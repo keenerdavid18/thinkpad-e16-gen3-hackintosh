@@ -1,0 +1,36 @@
+# SN6140 widget graph, dumped 2026-11-01 with dump-codec.py (alc-verb, alcverbs=1).
+# Pin configs and subsystem shown are AppleALC's injected values (layout 21), not BIOS defaults.
+Vendor 0x14f11f87  Subsystem 0x106b0700  Rev 0x00100100
+Node 0x10 [Audio Output] wcaps 0x00000c1d ampOut 0x80034a4a
+Node 0x11 [Audio Output] wcaps 0x00000c1d ampOut 0x80034a4a
+Node 0x12 [Beep Generator] wcaps 0x0070000c ampOut 0x000f0707
+Node 0x13 [Audio Input] wcaps 0x00100d1b ampIn 0x8003504a
+    conn 0x18* 0x19 0x1a 0x15
+Node 0x14 [Audio Input] wcaps 0x00100d1b ampIn 0x8003504a
+    conn 0x1a* 0x15
+Node 0x15 [15] wcaps 0x00f0050b ampIn 0x80034a4a
+    conn 0x10* 0x11
+Node 0x16 [Pin Complex] wcaps 0x00400581
+    pincfg 0x00211040  Jack HP Out loc 0x00 assoc 4 seq 0  pincap 0x0001001c OUT HP EAPD  ctl 0x00
+    conn 0x10* 0x11
+Node 0x17 [Pin Complex] wcaps 0x00400501
+    pincfg 0x91170010  Fixed Speaker loc 0x11 assoc 1 seq 0  pincap 0x00010010 OUT EAPD  ctl 0x00
+    conn 0x10* 0x11
+Node 0x18 [Pin Complex] wcaps 0x0040048b ampIn 0x002f0300
+    pincfg 0x40f001f0  None Other loc 0x00 assoc 15 seq 0  pincap 0x00001324 IN  ctl 0x00
+Node 0x19 [Pin Complex] wcaps 0x0040048b ampIn 0x002f0300
+    pincfg 0x00811030  Jack Line In loc 0x00 assoc 3 seq 0  pincap 0x00001324 IN  ctl 0x04
+Node 0x1a [Pin Complex] wcaps 0x0040048b ampIn 0x002f0300
+    pincfg 0x90a00020  Fixed Mic In loc 0x10 assoc 2 seq 0  pincap 0x00000024 IN  ctl 0x00
+Node 0x1b [15] wcaps 0x00f00000
+Node 0x1c [15] wcaps 0x00f00000
+Node 0x1d [15] wcaps 0x00f0058b ampIn 0x00000000
+    conn 
+Node 0x1e [15] wcaps 0x00f0058b ampIn 0x00000000
+    conn 
+Node 0x1f [15] wcaps 0x00f0058b ampIn 0x00000000
+    conn 
+Node 0x20 [Audio Output] wcaps 0x00000611
+Node 0x21 [Pin Complex] wcaps 0x00400701
+    pincfg 0x40f001f0  None Other loc 0x00 assoc 15 seq 0  pincap 0x00000010 OUT  ctl 0x00
+    conn 0x20
