@@ -43,6 +43,15 @@ to about 1470 / 6900 (single / multi). `sysctl hw.physicalcpu` shows 6 when it's
 effect on a single tight synthetic loop looks negative (a lone loop sits on an E-core); judge it
 with real workloads.
 
+## Smoother animations
+
+Turn on **System Settings → Accessibility → Display → Reduce transparency**. Tahoe's Liquid
+Glass adds blur layers to every frame. On this stack the bottleneck is handing frames to the
+GPU (CPU/driver side, host scheduler without GuC), not GPU power: during the "click wallpaper to
+reveal desktop" slide the GPU drew under 0.5 W while WindowServer spiked to 20–50% CPU. With
+Reduce transparency that animation is much smoother. **Reduce motion** (fades instead of
+slides) is the next step if anything still stutters.
+
 ## Background GPU work
 
 The GPU still hangs now and then (see [KNOWN-ISSUES.md](KNOWN-ISSUES.md)). Usually the driver
