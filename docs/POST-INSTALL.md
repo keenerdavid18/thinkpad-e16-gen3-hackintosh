@@ -36,6 +36,27 @@ after the first iCloud sync) the fan will run hard for a while. To bias towards 
 permanent. If you hear coil whine at idle: `sudo sysctl -w debug.xepm.cst=0` (boot-arg
 `ngreenpmcst=0`).
 
+CPU scheduling: the CPU is hybrid (6 P-cores with HT + 4 E-cores). Without help macOS sees 16
+identical cores and moves threads between fast and slow ones every second. CpuTopologyRebuild
+(in `EFI/OC/Kexts`, enabled in `config.plist`) fixes that: Geekbench 7 went from about 960 / 5200
+to about 1470 / 6900 (single / multi). `sysctl hw.physicalcpu` shows 6 when it's active. Its
+effect on a single tight synthetic loop looks negative (a lone loop sits on an E-core); judge it
+with real workloads.
+
+## Background GPU work
+
+The GPU still hangs now and then (see [KNOWN-ISSUES.md](KNOWN-ISSUES.md)). Usually the driver
+recovers, but heavy background GPU work while nobody is using the Mac can end in a frozen black
+screen and a restart. The main source is Photos' library analysis after the first iCloud sync.
+Turning it off stops People/Pets grouping, content search ("dog", "beach"), Memories and the
+Duplicates album from updating; viewing, editing and iCloud Photos sync keep working:
+
+```zsh
+launchctl disable gui/$(id -u)/com.apple.photoanalysisd
+launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
+# undo: the same with "enable", then log out and back in
+```
+
 ## Wi-Fi
 
 - Native Wi-Fi menu via AirportItlwm-Tahoe. WPA2 and WPA2/WPA3 transition networks only.

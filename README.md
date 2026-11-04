@@ -36,7 +36,7 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for details.
 | Ethernet | IntelMausi, TSO/CSO6 offloads off |
 | Touchpad (gestures, GPIO interrupts), keyboard, TrackPoint | VoodooI2C + patched VoodooGPIO, VoodooPS2 |
 | iMessage, FaceTime, iCloud, App Store | with your own SMBIOS serials |
-| CPU turbo + deep idle | NootedGreen XE-PM (`-ngreenpm`) |
+| CPU turbo + deep idle, P/E-core scheduling | NootedGreen XE-PM (`-ngreenpm`) + CpuTopologyRebuild 2.0.2; Geekbench 7 ≈ 1470 single / 6600–7150 multi |
 | USB, NVMe, battery, keyboard backlight (Fn+Space) | |
 
 | Doesn't work | |

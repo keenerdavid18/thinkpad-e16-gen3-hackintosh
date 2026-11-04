@@ -5,6 +5,7 @@
 | No system sleep | Modern-Standby-only firmware; a sleep attempt never completes and WindowServer hangs on wake | `pmset` settings in [POST-INSTALL.md](POST-INSTALL.md#power-sleep-and-the-lid); shut down instead |
 | GPU hang right after boot | `gpuRestart` report on the copy engine (BCS, signature 2803) shortly after login on most boots | recovers by itself, harmless |
 | Occasional render-engine hang | `gpuRestart` in WindowServer (RCS, `WAIT_ON_SCANLINE`), a known open issue of the NootedGreen stack; recovered as a brief blink | none needed; report patterns upstream |
+| Freeze + restart when left idle for hours | a GPU hang during heavy background work (Photos' first-time library analysis) is recovered, but a later client teardown waits forever on the hung job while holding a lock WindowServer needs; black screen, then a watchdog panic. Upstream issue [#31](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe/issues/31) | disable Photos/media analysis (see [POST-INSTALL.md](POST-INSTALL.md#background-gpu-work)), or shut down instead of leaving it idle |
 | Chrome flicker (e.g. PDFs) | Chrome's Skia Graphite renderer | `chrome://flags/#skia-graphite` → Disabled |
 | macOS updates | anything past 25G241 breaks graphics | keep automatic updates off |
 | AirDrop / AWDL / Sidecar | Intel Wi-Fi can't do AWDL | Broadcom card (untested; the CNVi slot may not take PCIe cards) |

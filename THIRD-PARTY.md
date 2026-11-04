@@ -11,6 +11,7 @@ license (as recorded by GitHub, checked 2026-11-02). Sources and versions:
 | WhateverGreen | 1.7.2 (from the JulioNectar reference EFI) | [acidanthera/WhateverGreen](https://github.com/acidanthera/WhateverGreen) | BSD-3-Clause |
 | VirtualSMC, SMCProcessor, SMCBatteryManager | 1.3.8 | [acidanthera/VirtualSMC](https://github.com/acidanthera/VirtualSMC) | BSD-3-Clause |
 | RestrictEvents | 1.1.6 | [acidanthera/RestrictEvents](https://github.com/acidanthera/RestrictEvents) | BSD-3-Clause |
+| CpuTopologyRebuild | 2.0.2 | [b00t0x/CpuTopologyRebuild](https://github.com/b00t0x/CpuTopologyRebuild) | BSD-3-Clause |
 | NVMeFix | 1.1.3 | [acidanthera/NVMeFix](https://github.com/acidanthera/NVMeFix) | see upstream LICENSE |
 | BrightnessKeys | 1.0.4 | [acidanthera/BrightnessKeys](https://github.com/acidanthera/BrightnessKeys) | BSD-3-Clause |
 | BlueToolFixup | 2.7.2 | [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM) | GPL-2.0 |
@@ -22,7 +23,7 @@ license (as recorded by GitHub, checked 2026-11-02). Sources and versions:
 | itlwm | 2.3.0 | [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm) | GPL-2.0 ([licenses/itlwm-GPL-2.0.txt](licenses/itlwm-GPL-2.0.txt)) |
 | AirportItlwm-Tahoe | 2.4.0-alpha `7204c69` (official release build) | [laobamac/itlwm](https://github.com/laobamac/itlwm) | GPL-2.0 |
 | IntelBluetoothFirmware, IntelBTPatcher | 2.5.2 (`14787a2`), built by `src/intelbluetooth` | [lshbluesky/IntelBluetoothFirmware](https://github.com/lshbluesky/IntelBluetoothFirmware) | GPL-3.0; Intel firmware under its linux-firmware license |
-| NootedGreen | JulioNectar fork, NootedGreen `95f8189`, built with the reference's `build-nootedgreen.sh` | [JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe), [sgiammori/NootedGreen](https://github.com/sgiammori/NootedGreen) | Thou Shalt Not Profit 1.0 ([licenses/](licenses/NootedGreen-ThouShaltNotProfit-1.0.txt)): no commercial use |
+| NootedGreen | JulioNectar reference `24450b4` (NootedGreen base `95f8189`), built with the reference's `install.sh --build-only` | [JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe), [sgiammori/NootedGreen](https://github.com/sgiammori/NootedGreen) | Thou Shalt Not Profit 1.0 ([licenses/](licenses/NootedGreen-ThouShaltNotProfit-1.0.txt)): no commercial use |
 | `SSDT-PNLF.aml` | from the JulioNectar reference EFI | as above | |
 | SimpleHDA | 1.0.0 (**not included**, `tools/fetch-simplehda.sh`) | [laobamac/SimpleHDA](https://github.com/laobamac/SimpleHDA) | no license file; contains Apple's AppleHDA |
 
