@@ -12,6 +12,7 @@
 | Internal microphones | DMICs behind the Intel DSP | headset or USB mic |
 | ThinkPad hotkeys F4, F7–F12 | EC → HKEY events (`_Qxx` → `MHKQ`), not handled | none yet (YogaSMC is untested on Tahoe) |
 | WPA3-only Wi-Fi | AirportItlwm limitation | WPA2/WPA3 mixed mode on the router |
+| Pressing the touchpad to click does nothing | VoodooInput presents a Force Touch trackpad but reports no pressure | Trackpad → turn off "Force Click and haptic feedback" |
 | TrackPoint speed | follows the **Mouse** slider, not the Trackpad one | – |
 | `disk0`/`disk1` numbers swap between boots | NVMe enumeration order | identify the ESP by size/contents before mounting |
 | Dual boot: Windows clock off | Windows keeps the RTC in local time | set `RealTimeIsUniversal` in Windows |

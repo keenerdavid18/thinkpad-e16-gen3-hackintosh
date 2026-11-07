@@ -98,6 +98,9 @@ launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
 - The calculator key is remapped to **F16** (VoodooPS2 `Custom ADB Map` `e021=6a`). Bind it with
   a Shortcuts-app keyboard shortcut. This mapping hasn't been verified on the hardware.
 - **System Settings → Trackpad** controls the touchpad; **→ Mouse** controls the TrackPoint.
+- **Turn off Trackpad → Point & Click → "Force Click and haptic feedback".** The touchpad shows up
+  as a Magic Trackpad 2, but it has no pressure sensor. With Force Click on, pressing the pad down
+  to click is ignored (tap to click still works).
 
 ## Chrome
 
