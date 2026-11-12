@@ -31,21 +31,23 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for details.
 | Graphics acceleration (Metal 2), video playback | NootedGreen; see [docs/GRAPHICS.md](docs/GRAPHICS.md) |
 | Brightness (slider + Fn+F5/F6), display sleep, lid → display off | `ngreenblmax=17741` for the full range |
 | Internal speakers, headphone jack | custom AppleALC (SN6140) + SimpleHDA (AppleHDA was removed in Tahoe) |
-| Wi-Fi (native menu, Wi-Fi 6 rates), Location Services | AirportItlwm-Tahoe `7204c69`; WPA2 and WPA2/WPA3 mixed only |
-| Bluetooth | IntelBluetoothFirmware/IntelBTPatcher 2.5.2 (lshbluesky fork) |
+| Wi-Fi (native menu, Wi-Fi 6 rates), Location Services | ForbiddenItlwm 0.3.1-test1 (AirportItlwm-Tahoe fork); WPA2 and WPA2/WPA3 mixed only |
+| **AirDrop** (iPhone ↔ Mac) | ForbiddenItlwm + BTLEAdvFixup (prerelease); see [docs/AIRDROP.md](docs/AIRDROP.md) |
+| Bluetooth | IntelBluetoothFirmware 2.5.2 (lshbluesky fork) + BTLEAdvFixup; idles at low power with [BTIdle](https://github.com/keenerdavid18/hackintosh-power-tools/tree/main/macos/btidle) |
 | Ethernet | IntelMausi, TSO/CSO6 offloads off |
 | Touchpad (gestures, GPIO interrupts), keyboard, TrackPoint | VoodooI2C + patched VoodooGPIO, VoodooPS2 |
 | iMessage, FaceTime, iCloud, App Store | with your own SMBIOS serials |
 | CPU turbo + deep idle, P/E-core scheduling | NootedGreen XE-PM (`-ngreenpm`) + CpuTopologyRebuild 2.0.2; Geekbench 7 ≈ 1470 single / 6600–7150 multi |
+| ThinkPad hotkeys (F4 mic mute, F7–F12), fan and sensors | YogaSMC 1.5.3 (+ the YogaSMCNC menu-bar app) |
+| Idle power: CPU package ~2.5–3.2 W (was ~6 W) | EPP 96, NVMe L1 substates, BTIdle, timer coalescing; see [docs/POST-INSTALL.md](docs/POST-INSTALL.md#idle-power) |
 | USB, NVMe, battery, keyboard backlight (Fn+Space) | |
 
 | Doesn't work | |
 |---|---|
 | **System sleep** | the firmware is Modern Standby only; sleep is disabled and display sleep is used instead |
-| AirDrop / AWDL / Sidecar | Intel Wi-Fi can't do AWDL; would need a Broadcom card |
+| Sidecar, Universal Control | untested |
 | Internal microphones | DMICs behind the Intel DSP; the headset mic works |
-| ThinkPad hotkeys F4 (mic mute), F7–F12 | EC/HKEY events, no driver yet; F1–F3 and PrtSc (= F13) work |
-| WPA3-only Wi-Fi networks | AirportItlwm limitation |
+| WPA3-only Wi-Fi networks | AirportItlwm/ForbiddenItlwm limitation |
 
 More in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 
@@ -74,9 +76,9 @@ More in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 | `acpi/` | sources of the SSDTs in `EFI/OC/ACPI` |
 | `src/applealc/` | builds AppleALC 1.9.8 with an **SN6140** entry (not in upstream AppleALC) |
 | `src/voodoogpio/` | builds VoodooGPIO with the Tiger Lake-LP `start` fix this machine's GPIO needs |
-| `src/intelbluetooth/` | builds IntelBluetoothFirmware/IntelBTPatcher 2.5.2 (lshbluesky fork, newer AX211 firmware) |
+| `src/intelbluetooth/` | builds IntelBluetoothFirmware/IntelBTPatcher 2.5.2 (lshbluesky fork, newer AX211 firmware) with the idle-suspend power-state patch |
 | `refind/` | Apple-logo icon and its generator, for the optional rEFInd menu |
-| `tools/` | `fetch-simplehda.sh` |
+| `tools/` | `fetch-simplehda.sh`; `timer-coalesce/` (optional LaunchDaemon, lower idle power) |
 
 All build scripts use only the Xcode **Command Line Tools** (no full Xcode).
 
@@ -84,7 +86,8 @@ All build scripts use only the Xcode **Command Line Tools** (no full Xcode).
 
 Built on the work of acidanthera (OpenCore, Lilu, AppleALC, WhateverGreen, VirtualSMC, …),
 StezzaPilot/sgiammori (NootedGreen), JulioNectar (the Tahoe Iris Xe stack this build follows),
-OpenIntelWireless and laobamac (itlwm/AirportItlwm), lshbluesky (IntelBluetoothFirmware fork),
+OpenIntelWireless and laobamac (itlwm/AirportItlwm), retropineaple (ForbiddenItlwm, BTLEAdvFixup),
+zhen-zen (YogaSMC), lshbluesky (IntelBluetoothFirmware fork),
 VoodooI2C/VoodooPS2, USBToolBox and laobamac (SimpleHDA). Third-party components keep their own
 licenses: see [THIRD-PARTY.md](THIRD-PARTY.md). This repo's own scripts and docs are MIT
 ([LICENSE](LICENSE)).

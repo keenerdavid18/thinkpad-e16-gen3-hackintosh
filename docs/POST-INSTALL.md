@@ -10,7 +10,7 @@
   "Please enter a valid serial number". macserial can produce serials of real Macs. The first
   one generated for this build belonged to a real 2020 MacBook Pro.
 - `ROM` = the I219-V Ethernet MAC (6 bytes). The Ethernet port is `en0` (built-in, primary),
-  which iMessage/FaceTime want. AirportItlwm keeps Wi-Fi on `en2`.
+  which iMessage/FaceTime want. The Wi-Fi driver keeps Wi-Fi on `en2`.
 - Sign in to the App Store first, then Messages and FaceTime. **Never change these values
   after signing in.**
 - With iCloud signed in, macOS may turn on **FileVault**. The boot then shows the unlock screen
@@ -31,10 +31,10 @@ Closing the lid then turns the display off and the Mac keeps running. **Shut dow
 putting it in a bag.**
 
 CPU: `-ngreenpm` gives full turbo. Under sustained load (e.g. Spotlight indexing everything
-after the first iCloud sync) the fan will run hard for a while. To bias towards efficiency,
-`sudo sysctl -w debug.xepm.epp=64` lasts until reboot; boot-arg `ngreenpmepp=64` makes it
-permanent. If you hear coil whine at idle: `sudo sysctl -w debug.xepm.cst=0` (boot-arg
-`ngreenpmcst=0`).
+after the first iCloud sync) the fan will run hard for a while. `config.plist` sets
+`ngreenpmepp=96` (energy/performance preference: a bit more towards efficiency, ~1.5 W less at
+idle; `sudo sysctl -w debug.xepm.epp=…` changes it until reboot). If you hear coil whine at idle:
+`sudo sysctl -w debug.xepm.cst=0` (boot-arg `ngreenpmcst=0`).
 
 CPU scheduling: the CPU is hybrid (6 P-cores with HT + 4 E-cores). Without help macOS sees 16
 identical cores and moves threads between fast and slow ones every second. CpuTopologyRebuild
@@ -42,6 +42,28 @@ identical cores and moves threads between fast and slow ones every second. CpuTo
 to about 1470 / 6900 (single / multi). `sysctl hw.physicalcpu` shows 6 when it's active. Its
 effect on a single tight synthetic loop looks negative (a lone loop sits on an E-core); judge it
 with real workloads.
+
+## Idle power
+
+Measured with the CPU's own counters (package C-state residency and RAPL energy, using
+[hackintosh-power-tools](https://github.com/keenerdavid18/hackintosh-power-tools)): the idle CPU
+package went from ~6 W to ~2.5–3 W. Already in `config.plist`:
+
+- `ngreenpmepp=96` (see above).
+- **NVMe L1 substates:** NVMeFix's `-nvmefaspm` only enables ASPM L1. The DeviceProperties
+  `pci-l1ss-enable` / `pci-max-latency` on both NVMe drives and their root ports add L1.1/L1.2 and
+  LTR. Without them the package can't go below PC3 (Linux shows the same).
+- **BTIdle** + the IntelBluetoothFirmware power-state patch: lets the Bluetooth controller
+  idle-suspend. Without it, Bluetooth being on caps the package at PC3 (~1.6 W more). Check
+  with `ioreg -r -c BTIdle -d1 | grep btidle-status`. Turn it off with
+  `sudo sysctl debug.btidle.ms=0` if Bluetooth misbehaves.
+
+Optional:
+
+- **Timer coalescing** (`tools/timer-coalesce`, a LaunchDaemon): wider kernel timer windows mean
+  fewer CPU wake-ups, ~0.7 W less at idle. Timers may fire up to 10 ms late; see its README.
+- **Unplug Ethernet** when you don't need it. A linked I219-V keeps the package at PC3.
+- **Keyboard backlight off** (Fn+Space) saves ~2 W of whole-laptop power.
 
 ## Smoother animations
 
@@ -68,8 +90,9 @@ launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
 
 ## Wi-Fi
 
-- Native Wi-Fi menu via AirportItlwm-Tahoe. WPA2 and WPA2/WPA3 transition networks only.
-  WPA3-only networks and mandatory PMF don't work.
+- Native Wi-Fi menu via ForbiddenItlwm (an AirportItlwm-Tahoe fork that also does AirDrop;
+  see [AIRDROP.md](AIRDROP.md)). WPA2 and WPA2/WPA3 transition networks only. WPA3-only networks
+  and mandatory PMF don't work.
 - Wi-Fi uses a random ("private") MAC by default. Turn it off per network if your router or
   DNS server needs a stable address.
 - **Pi-hole / filtering DNS users:**
@@ -78,10 +101,11 @@ launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
     that network.
   - If Location Services never finds you, allowlist **`gs-loc.apple.com`** (Apple's Wi-Fi
     location lookup; it's on some blocklists).
-- Location Services need an AirportItlwm build with the connected-scan fix (laobamac
-  `7204c69` or newer, as shipped here). Older builds return no networks to `locationd`.
-- Fallback: `itlwm.kext` + HeliPort (in the EFI, `MaxKernel 24.99.99`). To use it on Tahoe,
-  swap the Min/MaxKernel of itlwm and AirportItlwm. Never load both.
+- Location Services need the connected-scan fix (laobamac AirportItlwm `7204c69` or newer;
+  ForbiddenItlwm includes it). Older builds return no networks to `locationd`.
+- Fallbacks: AirportItlwm (in the EFI, disabled; see [AIRDROP.md](AIRDROP.md#switching-back-to-airportitlwm-no-airdrop)),
+  and `itlwm.kext` + HeliPort (`MaxKernel 24.99.99`; to use it on Tahoe, swap its Min/MaxKernel
+  with the active Wi-Fi kext's). Only ever load one Wi-Fi kext.
 
 ## Audio
 
@@ -95,6 +119,11 @@ launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
 - macOS key positions: **Alt = Command, Windows key = Option.**
 - F1–F3 (mute/volume) work. PrtSc arrives as **F13**; bind it under Keyboard Shortcuts →
   Screenshots. Fn+F5/F6 change brightness. Fn+Space is the keyboard backlight (handled by the EC).
+- **F4 (mic mute) and F7–F12** go through the ThinkPad EC and need YogaSMC (in the EFI) plus its
+  menu-bar app **YogaSMCNC** from the [YogaSMC 1.5.3 release](https://github.com/zhen-zen/YogaSMC/releases/tag/1.5.3):
+  copy it to `/Applications` and add it to **System Settings → General → Login Items**.
+- If the keyboard backlight won't stay off, YogaSMCNC has saved a bad backlight timeout: quit it,
+  run `defaults write org.zhen.YogaSMC BacklightTimeout -int 0`, and start it again.
 - The calculator key is remapped to **F16** (VoodooPS2 `Custom ADB Map` `e021=6a`). Bind it with
   a Shortcuts-app keyboard shortcut. This mapping hasn't been verified on the hardware.
 - **System Settings → Trackpad** controls the touchpad; **→ Mouse** controls the TrackPoint.
@@ -104,8 +133,11 @@ launchctl disable gui/$(id -u)/com.apple.mediaanalysisd
 
 ## Chrome
 
-If Chrome flickers, e.g. when viewing PDFs, open `chrome://flags/#skia-graphite`, set it to
-**Disabled** and relaunch. Fallback: Settings → System → turn off graphics acceleration.
+If Chrome flickers, e.g. when viewing PDFs, open `chrome://flags/#skia-graphite`, choose the option
+labelled **Disabled** and relaunch. Then check `chrome://gpu`: WebGL and WebGL2 must still say
+"Hardware accelerated". Chrome stores flag choices by position, and after a Chrome update the
+stored choice disabled the GPU entirely here ("GPU access is disabled due to frequent crashes",
+no WebGL; sites like Gaia GPS refuse to load). Setting the flag back to **Default** fixed that.
 
 ## Never update
 

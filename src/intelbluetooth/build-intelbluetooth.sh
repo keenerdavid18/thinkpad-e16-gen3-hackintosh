@@ -27,6 +27,12 @@ if [[ ! -d $DEPS/IntelBluetoothFirmware ]]; then
   git -C $DEPS/IntelBluetoothFirmware checkout -q $REV
 fi
 I=$DEPS/IntelBluetoothFirmware
+# Local patches (patches/*.patch) on top of the pinned fork; IBF_PATCHES=0 builds the fork unmodified.
+# 0001: power-child state uses kIOPMLowPower so the controller can idle-suspend (with BTIdle; ~1.6 W idle).
+git -C $I checkout -q -- .
+if [[ ${IBF_PATCHES:-1} = 1 ]]; then
+  for p in $ROOT/patches/*.patch(N); do git -C $I apply $p && echo "applied ${p:t}"; done
+fi
 SDK=$DEPS/MacKernelSDK
 LILU=$DEPS/Lilu.kext/Contents/Resources
 BASE=(-arch x86_64 -mkernel -nostdinc -fno-builtin -fno-common -fno-stack-protector -mmacosx-version-min=11.0

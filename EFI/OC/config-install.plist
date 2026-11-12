@@ -180,6 +180,42 @@
 				FQAAAA==
 				</data>
 			</dict>
+			<key>PciRoot(0x0)/Pci(0x6,0x0)</key>
+			<dict>
+				<key>pci-l1ss-enable</key>
+				<data>
+				DwASYA==
+				</data>
+			</dict>
+			<key>PciRoot(0x0)/Pci(0x6,0x0)/Pci(0x0,0x0)</key>
+			<dict>
+				<key>pci-l1ss-enable</key>
+				<data>
+				DwASYA==
+				</data>
+				<key>pci-max-latency</key>
+				<data>
+				AxADEA==
+				</data>
+			</dict>
+			<key>PciRoot(0x0)/Pci(0x6,0x2)</key>
+			<dict>
+				<key>pci-l1ss-enable</key>
+				<data>
+				DwASYA==
+				</data>
+			</dict>
+			<key>PciRoot(0x0)/Pci(0x6,0x2)/Pci(0x0,0x0)</key>
+			<dict>
+				<key>pci-l1ss-enable</key>
+				<data>
+				DwASYA==
+				</data>
+				<key>pci-max-latency</key>
+				<data>
+				AxADEA==
+				</data>
+			</dict>
 		</dict>
 		<key>Delete</key>
 		<dict/>
@@ -264,6 +300,24 @@
 				<key>Arch</key>
 				<string>x86_64</string>
 				<key>BundlePath</key>
+				<string>YogaSMC.kext</string>
+				<key>Comment</key>
+				<string>ThinkPad EC: Fn hotkeys, sensors (zhen-zen 1.5.3)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/YogaSMC</string>
+				<key>MaxKernel</key>
+				<string></string>
+				<key>MinKernel</key>
+				<string></string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
 				<string>IntelMausiEthernet.kext</string>
 				<key>Comment</key>
 				<string>I219-V Ethernet</string>
@@ -302,11 +356,29 @@
 				<key>BundlePath</key>
 				<string>AirportItlwm.kext</string>
 				<key>Comment</key>
-				<string>AirportItlwm-Tahoe 2.4.0-alpha (laobamac 7204c69) - native Wi-Fi, Tahoe only</string>
+				<string>AirportItlwm-Tahoe 2.4.0-alpha (laobamac 7204c69) - native Wi-Fi, Tahoe only [disabled: ForbiddenItlwm is the default; to switch back see docs/AIRDROP.md]</string>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/AirportItlwm</string>
+				<key>MaxKernel</key>
+				<string>25.99.99</string>
+				<key>MinKernel</key>
+				<string>25.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>ForbiddenItlwm.kext</string>
+				<key>Comment</key>
+				<string>ForbiddenItlwm 0.3.1-test1 (AirportItlwm fork with AWDL/AirDrop; includes our #6 zero-padding fix), Tahoe only</string>
+				<key>Enabled</key>
+				<false/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/ForbiddenItlwm</string>
 				<key>MaxKernel</key>
 				<string>25.99.99</string>
 				<key>MinKernel</key>
@@ -644,7 +716,7 @@
 				<key>BundlePath</key>
 				<string>IntelBluetoothFirmware.kext</string>
 				<key>Comment</key>
-				<string>IntelBluetoothFirmware 2.5.2 (lshbluesky fork 14787a2, newer AX211 firmware) - src/intelbluetooth</string>
+				<string>IntelBluetoothFirmware 2.5.2 (lshbluesky fork 14787a2, newer AX211 firmware) - src/intelbluetooth [power child kIOPMLowPower patch for idle suspend]</string>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>
@@ -662,11 +734,47 @@
 				<key>BundlePath</key>
 				<string>IntelBTPatcher.kext</string>
 				<key>Comment</key>
-				<string>IntelBTPatcher 2.5.2 (lshbluesky fork 14787a2) - src/intelbluetooth</string>
+				<string>IntelBTPatcher 2.5.2 (lshbluesky fork 14787a2) - src/intelbluetooth [disabled: replaced by BTLEAdvFixup]</string>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/IntelBTPatcher</string>
+				<key>MaxKernel</key>
+				<string></string>
+				<key>MinKernel</key>
+				<string></string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>BTLEAdvFixup.kext</string>
+				<key>Comment</key>
+				<string>BTLEAdvFixup 0.8.1 (Tahoe): BLE advertising for AirDrop</string>
+				<key>Enabled</key>
+				<false/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/BTLEAdvFixup</string>
+				<key>MaxKernel</key>
+				<string>25.99.99</string>
+				<key>MinKernel</key>
+				<string>25.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>BTIdle.kext</string>
+				<key>Comment</key>
+				<string>BTIdle 0.1.1: Bluetooth USB idle suspend (8087:0033), ~-1.6 W idle with BT on</string>
+				<key>Enabled</key>
+				<false/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/BTIdle</string>
 				<key>MaxKernel</key>
 				<string></string>
 				<key>MinKernel</key>

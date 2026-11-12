@@ -21,15 +21,20 @@ license (as recorded by GitHub, checked 2026-11-02). Sources and versions:
 | USBToolBox | 1.2.0 | [USBToolBox/kext](https://github.com/USBToolBox/kext) | no license file upstream |
 | IntelMausiEthernet | 3.0.1 | [Mieze/IntelMausiEthernet](https://github.com/Mieze/IntelMausiEthernet) | no license file upstream (see source headers) |
 | itlwm | 2.3.0 | [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm) | GPL-2.0 ([licenses/itlwm-GPL-2.0.txt](licenses/itlwm-GPL-2.0.txt)) |
-| AirportItlwm-Tahoe | 2.4.0-alpha `7204c69` (official release build) | [laobamac/itlwm](https://github.com/laobamac/itlwm) | GPL-2.0 |
-| IntelBluetoothFirmware, IntelBTPatcher | 2.5.2 (`14787a2`), built by `src/intelbluetooth` | [lshbluesky/IntelBluetoothFirmware](https://github.com/lshbluesky/IntelBluetoothFirmware) | GPL-3.0; Intel firmware under its linux-firmware license |
+| AirportItlwm-Tahoe | 2.4.0-alpha `7204c69` (official release build; disabled fallback in `config.plist`, used by `config-install.plist`) | [laobamac/itlwm](https://github.com/laobamac/itlwm) | GPL-2.0 |
+| ForbiddenItlwm | 0.3.1-test1 (official prerelease build, [release](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.3.1-test1)) | [retropineaple/ForbiddenItlwm](https://github.com/retropineaple/ForbiddenItlwm) | GPL-2.0 |
+| BTLEAdvFixup | 0.8.1 (official release build, same release) | [retropineaple/ForbiddenItlwm](https://github.com/retropineaple/ForbiddenItlwm) (`BTLEAdvFixup/`) | GPL-3.0 |
+| YogaSMC | 1.5.3 (official release build) | [zhen-zen/YogaSMC](https://github.com/zhen-zen/YogaSMC) | GPL-2.0 |
+| IntelBluetoothFirmware, IntelBTPatcher | 2.5.2 (`14787a2`), built by `src/intelbluetooth`; IntelBluetoothFirmware's power state patched for idle suspend (`src/intelbluetooth/patches`) | [lshbluesky/IntelBluetoothFirmware](https://github.com/lshbluesky/IntelBluetoothFirmware) | GPL-3.0; Intel firmware under its linux-firmware license |
 | NootedGreen | JulioNectar reference `24450b4` (NootedGreen base `95f8189`), built with the reference's `install.sh --build-only` | [JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe), [sgiammori/NootedGreen](https://github.com/sgiammori/NootedGreen) | Thou Shalt Not Profit 1.0 ([licenses/](licenses/NootedGreen-ThouShaltNotProfit-1.0.txt)): no commercial use |
 | `SSDT-PNLF.aml` | from the JulioNectar reference EFI | as above | |
 | SimpleHDA | 1.0.0 (**not included**, `tools/fetch-simplehda.sh`) | [laobamac/SimpleHDA](https://github.com/laobamac/SimpleHDA) | no license file; contains Apple's AppleHDA |
 
 **This repo:** `config.plist`, `config-install.plist`, `UTBMap.kext` (USBToolBox map for this
 laptop), `XHCI-unsupported-600.kext` (codeless, adds `0x51ed8086`), `SSDT-AWAC/PLUG-ALT/USBX/XOSI`
-(Dortania/acidanthera templates adapted to this DSDT), the build scripts and docs: MIT.
+(Dortania/acidanthera templates adapted to this DSDT), `BTIdle.kext` (source:
+[hackintosh-power-tools](https://github.com/keenerdavid18/hackintosh-power-tools/tree/main/macos/btidle)),
+`tools/timer-coalesce`, the build scripts and docs: MIT.
 `src/voodoogpio/build-voodoogpio.sh` is adapted from the JulioNectar project (TSNP 1.0).
 
 **Not included:** Apple software. The graphics install downloads and patches Apple's

@@ -63,5 +63,5 @@ reboot again.
 
 ## 6. Afterwards
 
-[POST-INSTALL.md](POST-INSTALL.md): power and sleep settings, Wi-Fi notes, iMessage, Chrome,
-brightness keys.
+[POST-INSTALL.md](POST-INSTALL.md): power and sleep settings, idle power, Wi-Fi notes, iMessage,
+ThinkPad hotkeys (YogaSMCNC), Chrome. `config.plist` also turns on AirDrop: [AIRDROP.md](AIRDROP.md).
