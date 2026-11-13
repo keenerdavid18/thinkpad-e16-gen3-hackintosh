@@ -31,8 +31,9 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for details.
 | Graphics acceleration (Metal 2), video playback | NootedGreen; see [docs/GRAPHICS.md](docs/GRAPHICS.md) |
 | Brightness (slider + Fn+F5/F6), display sleep, lid → display off | `ngreenblmax=17741` for the full range |
 | Internal speakers, headphone jack | custom AppleALC (SN6140) + SimpleHDA (AppleHDA was removed in Tahoe) |
-| Wi-Fi (native menu, Wi-Fi 6 rates), Location Services | ForbiddenItlwm 0.3.1-test1 (AirportItlwm-Tahoe fork); WPA2 and WPA2/WPA3 mixed only |
+| Wi-Fi (native menu, Wi-Fi 6 rates), Location Services | ForbiddenItlwm 0.5.3-test1 (AirportItlwm-Tahoe fork); WPA2 and WPA2/WPA3 mixed only |
 | **AirDrop** (iPhone ↔ Mac) | ForbiddenItlwm + BTLEAdvFixup (prerelease); see [docs/AIRDROP.md](docs/AIRDROP.md) |
+| **External displays:** HDMI port and **USB-C DisplayPort alt mode** (docks: 2560×1080@60 + DisplayLink, Ethernet, USB 3 and charging on one cable) | this EFI's NootedGreen build ([src/nootedgreen](src/nootedgreen)); connect after login; see [docs/DISPLAYS.md](docs/DISPLAYS.md) |
 | Bluetooth | IntelBluetoothFirmware 2.5.2 (lshbluesky fork) + BTLEAdvFixup; idles at low power with [BTIdle](https://github.com/keenerdavid18/hackintosh-power-tools/tree/main/macos/btidle) |
 | Ethernet | IntelMausi, TSO/CSO6 offloads off |
 | Touchpad (gestures, GPIO interrupts), keyboard, TrackPoint | VoodooI2C + patched VoodooGPIO, VoodooPS2 |
@@ -77,6 +78,7 @@ More in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 | `src/applealc/` | builds AppleALC 1.9.8 with an **SN6140** entry (not in upstream AppleALC) |
 | `src/voodoogpio/` | builds VoodooGPIO with the Tiger Lake-LP `start` fix this machine's GPIO needs |
 | `src/intelbluetooth/` | builds IntelBluetoothFirmware/IntelBTPatcher 2.5.2 (lshbluesky fork, newer AX211 firmware) with the idle-suspend power-state patch |
+| `src/nootedgreen/` | builds this EFI's NootedGreen: JulioNectar `24450b4` + VostroXe's HDMI (XE-HDMI13) + USB-C DisplayPort alt mode |
 | `refind/` | Apple-logo icon and its generator, for the optional rEFInd menu |
 | `tools/` | `fetch-simplehda.sh`; `timer-coalesce/` (optional LaunchDaemon, lower idle power) |
 
@@ -86,6 +88,7 @@ All build scripts use only the Xcode **Command Line Tools** (no full Xcode).
 
 Built on the work of acidanthera (OpenCore, Lilu, AppleALC, WhateverGreen, VirtualSMC, …),
 StezzaPilot/sgiammori (NootedGreen), JulioNectar (the Tahoe Iris Xe stack this build follows),
+henriquejsza (VostroXe: the HDMI port), b00t0x (WhateverXe, a reference for the USB-C work),
 OpenIntelWireless and laobamac (itlwm/AirportItlwm), retropineaple (ForbiddenItlwm, BTLEAdvFixup),
 zhen-zen (YogaSMC), lshbluesky (IntelBluetoothFirmware fork),
 VoodooI2C/VoodooPS2, USBToolBox and laobamac (SimpleHDA). Third-party components keep their own

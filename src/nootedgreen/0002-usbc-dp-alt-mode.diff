@@ -1,0 +1,1242 @@
+diff --git a/src/NootedGreen/kern_gen11.cpp b/src/NootedGreen/kern_gen11.cpp
+index f3f5d52..20c930a 100755
+--- a/src/NootedGreen/kern_gen11.cpp
++++ b/src/NootedGreen/kern_gen11.cpp
+@@ -1182,9 +1182,997 @@ static volatile UInt32 gHdmiPwPending = 0;
+ static char gHdmiRegsDiag1[460] = {};
+ static char gHdmiRegsDiag2[460] = {};
+ static volatile UInt32 gHdmiRegsHits = 0;
++// ===================================================================================================================
++// USB-C DisplayPort alt mode on ADL-P / RPL-P (Type-C port 1 = DDI index 3), with the TGL 16.0.32 framebuffer.
++// Boot args: -ngreentc1 (on), -ngreentc1dbg (snapshots, DPCD/transcoder trails, IOLog chatter in ioreg ngreen-tc1-*).
++// The TGL code is close to ADL-P but not equal; the pieces below fill the differences, in connection order:
++//  connector  Apple's own TC1 entry (DDI 3, GMBUS 9, DP, Type-C PHY) in connector slot 2 (getOSInformation).
++//  connect    setPortMode(3): PW2 + DC off, TC PHY ownership (DDI_BUF_CTL bit 6), TCSS ready instead of TGL's
++//             DFLEXDPPMS handshake, AUX power well + AUX routed to the PHY. isHPDLow from TCSS on unplug.
++//  PHY        Dekel register translation (HIP bank, PHY base, ADL-P TC PLL enable), both lane groups (pin-assignment
++//             mux, gating, drive), DKL_TX_PMD_LANE_SUS cleared; modular-FIA lane mask / configured lanes / lane count.
++//  path       a display path for the TC1 framebuffer before AGDC link training (allocateBootDisplayResources), full
++//             modeset for that path, HDCP2 register manager, DDI IO power well, transcoder clock (PHY encoding) +
++//             DDI route before training pattern 1, DDI_BUF_CTL link-rate field, enhanced framing in DP_TP_CTL.
++//  link       light-up kept at HBR2 (cached HBR2 PLL words, LINK_BW 0x0a->0x14, DATA/LINK M halved): the link does not
++//             equalise at HBR on this PHY setup; lanes clamped to the FIA's 2; converter MaxTMDSClock lane cap lifted.
++//  unplug     release (AUX/DDI IO wells, ownership, clock gate, route) only after Apple has turned the pipe off.
++// The "stage" notes below record why each piece exists (test history in the hackintosh repo, macos/usbc/).
++// ===================================================================================================================
++// ---- USB-C stage 1 (TC1) -------------------------------------------------------------------------------------
++// The dock's video is DP alt mode on Type-C port 1 = DDI index 3 (Linux: DDI_BUF_CTL 0x64300, 2 lanes HBR2).
++// Apple's stock 0x9A490000 table (FB 0xf3d48) already describes that port:
++//   {index 3, GMBUS 9, kind 1 (DP), phy 1 (Type-C), type DP, flags 0x201}
++// NootedGreen cuts the table to 3 ports with a dummy in slot 2, so getPortByDDI(3) finds nothing and the FB logs
++// "Hotplug detected on unsupported ddi 3". ngreentc1=1 puts Apple's TC1 entry in slot 2 (port count unchanged).
++// Stage 1 only observes (HPD, port mode, AUX): no register writes of our own. Off by default.
++//   ngreentc1=1       enable          ngreentc1ddi=N (3)    ngreentc1bus=N (9)    ngreentc1flags=N (0x201)
++//   ngreentc1mode=N   PortMode the probePortMode stub returns for this port: 3 = TC DP alt (2 = TBT, 4 = legacy)
++static uint32_t gTc1 = 0, gTc1Ddi = 3, gTc1Bus = 9, gTc1Flags = 0x201, gTc1Mode = 3;
++static volatile UInt32 gTc1Dumps = 0, gTc1AuxCalls = 0, gTc1AuxFails = 0, gTc1StubHits = 0, gTc1Hotplugs = 0;
++static volatile uint32_t gTc1LastAux = 0, gTc1LastMode = 0;
++static char gTc1Diag[2][300] = {};
++static char gTc1ModeDiag[280] = {};
++static char gTc1PwrDiag[200] = {};
++static char gTc1RelDiag[200] = {};
++static char gTc1FbDiag[160] = {};
++static uint32_t gTc1Fb = 2;   // ngreentc1fb: framebuffer index of connector slot 2
++static bool gTc1Dbg = false;   // -ngreentc1dbg: register snapshots, DPCD/transcoder trails, IOLog chatter
++static void xeTc1ParseArgs() {
++	static bool done = false;
++	if (done) return;
++	done = true;
++	// -ngreentc1 (or ngreentc1=<non-zero>, the old test levels) turns the whole USB-C DP alt-mode support on.
++	uint32_t v = 0;
++	if (checkKernelArgument("-ngreentc1") || (PE_parse_boot_argn("ngreentc1", &v, sizeof(v)) && v)) gTc1 = 1;
++	gTc1Dbg = gTc1 && checkKernelArgument("-ngreentc1dbg");
++	PE_parse_boot_argn("ngreentc1ddi", &gTc1Ddi, sizeof(gTc1Ddi));
++	PE_parse_boot_argn("ngreentc1bus", &gTc1Bus, sizeof(gTc1Bus));
++	PE_parse_boot_argn("ngreentc1flags", &gTc1Flags, sizeof(gTc1Flags));
++	PE_parse_boot_argn("ngreentc1mode", &gTc1Mode, sizeof(gTc1Mode));
++	PE_parse_boot_argn("ngreentc1fb", &gTc1Fb, sizeof(gTc1Fb));
++	if (gTc1Mode > 4) gTc1Mode = 3;
++	if (gTc1Ddi < 3 || gTc1Ddi > 8) gTc1 = 0;   // Type-C DDIs only; never collide with eDP/HDMI
++	if (gTc1) IOLog("XeNG TC1 enabled: ddi=%u gmbus=%u flags=0x%x mode=%u\n", gTc1Ddi, gTc1Bus, gTc1Flags, gTc1Mode);
++}
++// Read-only snapshot of the registers that describe TC1 (names as in i915). Two short log lines per call, capped.
++struct XeTc1Reg { uint32_t off; const char *name; };
++static const XeTc1Reg kXeTc1Regs[2][10] = {
++	{ {0x44470, "HPD_ISR"}, {0x44474, "HPD_IMR"}, {0x44478, "HPD_IIR"}, {0x44038, "TC_HPCTL"}, {0x44030, "TBT_HPCTL"},
++	  {0xc4000, "SDEISR"}, {0x161500, "TCSS_ST"}, {0x163880, "FIA_PA1"}, {0x163890, "FIA_DPPMS"}, {0x163894, "FIA_DPCSSS"} },
++	{ {0x1638a0, "FIA_DPSP"}, {0x1638c0, "FIA_DPMLE1"}, {0x64300, "DDI_BUF"}, {0x64310, "AUX_CTL"}, {0x45444, "PW_AUX2"},
++	  {0x45454, "PW_DDI2"}, {0x45404, "PW_CTL2"}, {0x164280, "DPCLKA"}, {0x46038, "TCPLL1"}, {0x46020, "TBTPLL"} },
++};
++static void xeTc1Dump(const char *tag) {
++	if (!gTc1Dbg) return;
++	if (!gTc1 || !NGreen::callback) return;
++	const UInt32 n = OSIncrementAtomic(&gTc1Dumps);
++	for (size_t l = 0; l < 2; l++) {
++		char b[300]; size_t o = 0; b[0] = 0;
++		for (const auto &r : kXeTc1Regs[l]) {
++			if (o + 28 >= sizeof(b)) break;
++			o += snprintf(b + o, sizeof(b) - o, " %s=%x", r.name, NGreen::callback->readReg32(r.off));
++		}
++		if (n < 40) IOLog("XeNG TC1 regs%u %s:%s\n", (unsigned)l, tag, b);
++		snprintf(gTc1Diag[l], sizeof(gTc1Diag[l]), "%s:%s", tag, b);
++	}
++}
++static void xeTc1PublishDkl(IOService *svc);
++// ---- USB-C stage 3q (ngreentc1=19): live snapshot of pipe B while the TC1 monitor is connected (diagnostic only) ----
++// 3p: M/N now right (DATA 0x34cccc/0x800000, LINK 0x23333/0x80000), link trained at HBR2 x2, TRANSCONF_B enabled, macOS
++// lists the LG - and the monitor still reports no signal. Every 2 s while TCSS shows DP alt mode, publish the pipe B /
++// plane / MSA / DP_TP / DBUF registers and two frame-counter readings so we can see whether pixels actually flow.
++static thread_call_t gTc1SnapTc = nullptr;
++static IOService *gTc1Svc = nullptr;
++static char gTc1Snap[2][420] = {};
++struct XeTc1Snap { uint32_t off; const char *n; };
++static const XeTc1Snap kTc1Snap[2][13] = {
++	{ {0x71008, "TRANSCONF"}, {0x71030, "PIPE_MISC"}, {0x61410, "MSA_MISC"}, {0x61540, "DP_TP_CTL"}, {0x61544, "DP_TP_ST"},
++	  {0x61400, "FUNC_CTL"}, {0x46144, "CLK_SEL"}, {0x64300, "DDI_BUF"}, {0x6101c, "PIPESRC"}, {0x71000, "PIPEDSL"},
++	  {0x71040, "FRMCNT"}, {0x70040, "FRMCNT_A"}, {0x44400, "DE_PIPE_ISR_B?"} },
++	{ {0x71180, "PLANE_CTL"}, {0x7119c, "SURF"}, {0x71190, "SIZE"}, {0x71188, "STRIDE"}, {0x711a4, "OFFSET"},
++	  {0x7127c, "BUF_CFG"}, {0x71240, "WM0"}, {0x45008, "DBUF_S1"}, {0x44fe8, "DBUF_S2"}, {0x45404, "PW_CTL2"},
++	  {0x45504, "DC_STATE"}, {0x44420, "DE_PIPE_IIR_B?"}, {0x71038, "PIPE_CHICKEN"} },
++};
++static void xeTc1SnapRun(thread_call_param_t, thread_call_param_t) {
++	if (!gTc1Dbg || !NGreen::callback) return;
++	const uint32_t st = NGreen::callback->readReg32(0x161500 + 4 * (gTc1Ddi - 3));
++	if (st == 0xffffffff || (st & 3) != 1) return;   // unplugged: stop until the next hotplug
++	for (int l = 0; l < 2; l++) {
++		size_t o = 0; gTc1Snap[l][0] = 0;
++		for (const auto &r : kTc1Snap[l]) {
++			if (o + 28 >= sizeof(gTc1Snap[l])) break;
++			o += snprintf(gTc1Snap[l] + o, sizeof(gTc1Snap[l]) - o, "%s=%x ", r.n, NGreen::callback->readReg32(r.off));
++		}
++	}
++	const uint32_t f1 = NGreen::callback->readReg32(0x71040); IOSleep(50); const uint32_t f2 = NGreen::callback->readReg32(0x71040);
++	size_t o = strlen(gTc1Snap[0]);
++	snprintf(gTc1Snap[0] + o, sizeof(gTc1Snap[0]) - o, "frames+50ms=%u", f2 - f1);
++	if (gTc1Svc) { gTc1Svc->setProperty("ngreen-tc1-snap0", gTc1Snap[0]); gTc1Svc->setProperty("ngreen-tc1-snap1", gTc1Snap[1]); }
++	uint64_t dl; clock_interval_to_deadline(2000, kMillisecondScale, &dl);
++	thread_call_enter_delayed(gTc1SnapTc, dl);
++}
++static void xeTc1SnapStart(IOService *svc) {
++	if (!gTc1Dbg || !svc) return;
++	gTc1Svc = svc;
++	if (!gTc1SnapTc) gTc1SnapTc = thread_call_allocate(xeTc1SnapRun, nullptr);
++	if (!gTc1SnapTc) return;
++	uint64_t dl; clock_interval_to_deadline(3000, kMillisecondScale, &dl);
++	thread_call_enter_delayed(gTc1SnapTc, dl);
++}
++static void xeTc1PublishPath(IOService *svc);
++static void xeTc1Publish(void *controller) {
++	if (!gTc1 || !controller) return;
++	auto *svc = OSDynamicCast(IOService, reinterpret_cast<OSObject *>(controller));
++	if (!svc) return;
++	char b[160];
++	snprintf(b, sizeof(b), "ddi=%u hotplugs=%u lastmode=%u probe-stub=%u aux-calls=%u aux-fails=%u aux-last=0x%x",
++			 gTc1Ddi, (unsigned)gTc1Hotplugs, gTc1LastMode, (unsigned)gTc1StubHits, (unsigned)gTc1AuxCalls,
++			 (unsigned)gTc1AuxFails, gTc1LastAux);
++	svc->setProperty("ngreen-tc1", b);
++	if (gTc1Diag[0][0]) svc->setProperty("ngreen-tc1-regs0", gTc1Diag[0]);
++	if (gTc1Diag[1][0]) svc->setProperty("ngreen-tc1-regs1", gTc1Diag[1]);
++	if (gTc1ModeDiag[0]) svc->setProperty("ngreen-tc1-mode", gTc1ModeDiag);
++	if (gTc1PwrDiag[0]) svc->setProperty("ngreen-tc1-pwr", gTc1PwrDiag);
++	if (gTc1RelDiag[0]) svc->setProperty("ngreen-tc1-release", gTc1RelDiag);
++	if (gTc1FbDiag[0]) svc->setProperty("ngreen-tc1-online", gTc1FbDiag);
++	xeTc1SnapStart(svc);
++	xeTc1PublishPath(svc);
++	xeTc1PublishDkl(svc);
++}
++// ---- USB-C stage 2 (ngreentc1=2): get Apple's own DP-alt setPortMode() through on ADL-P/RPL-P ---------------------
++// Stage 1 result: AppleIntelPortHAL::setPortMode(3) enables the AUX well, then polls FIA DFLEXDPPMS (0x163890) bit
++// (ddi-3) for 100 ms: "Timeout waiting for DP mode switch of TC port", then it drops the AUX well and falls back to
++// mode 0, so every AUX transfer times out. That bit is the TGL handshake. On ADL-P (i915 adlp_tc_phy_*) the driver
++// takes the PHY with DDI_BUF_CTL bit 6 (TC_PHY_OWNERSHIP) and "ready" is TCSS_DDI_STATUS (0x161500+4*tc) bit 2.
++//   - before Apple's setPortMode(3) on the TC1 port: set DDI_BUF_CTL bit 6, wait for TCSS ready (<= 500 ms);
++//   - during that call only: reads of 0x163890 report the port's bit when TCSS says ready;
++//   - after setPortMode(0): give the PHY back (clear bit 6) unless the DDI is enabled.
++static mach_vm_address_t gTc1OrgSetMode = 0, gTc1OrgRegRead = 0;
++static volatile UInt32 gTc1Switching = 0, gTc1Owned = 0, gTc1FakeReads = 0, gTc1Sets = 0;
++static inline uint32_t xeTc1Rd(uint32_t r) { return NGreen::callback->readReg32(r); }
++static volatile UInt32 gTc1NullMgr = 0;
++static char gTc1RnuDiag[160] = {};
++void xeTc1NoteRnu(uint32_t pipe, uint32_t tconf, uint32_t buf, bool lit, int d, uint32_t forces) {
++	snprintf(gTc1RnuDiag, sizeof(gTc1RnuDiag), "pipe=%c TRANSCONF=%x DDI_BUF=%x lit=%d decision=%d forces=%u nullmgr=%u",
++			 'A' + pipe, tconf, buf, (int)lit, d, forces, (unsigned)gTc1NullMgr);
++	// (HDCP2 timer skips are in ngreen-tc1-train)
++}
++static uint32_t xeTc1RegRead(void *mgr, unsigned long reg) {
++	// 3j panic: AppleIntelHDCP2::handleDisableHDCP (HDCP timer, after the TC1 link came up) called ReadRegister32 with a
++	// NULL register manager -> page fault at mgr+0x60. Apple's bug on a port it never initialised HDCP for; read 0.
++	if (!mgr && gTc1) { OSIncrementAtomic(&gTc1NullMgr); return 0; }
++	uint32_t v = FunctionCast(xeTc1RegRead, gTc1OrgRegRead)(mgr, reg);
++	if (reg == 0x163890 && gTc1Switching) {
++		const uint32_t st = xeTc1Rd(0x161500 + 4 * (gTc1Ddi - 3));
++		if (st != 0xffffffff && (st & 4)) { v |= 1u << (gTc1Ddi - 3); OSIncrementAtomic(&gTc1FakeReads); }
++	}
++	return v;
++}
++// Unplug cleanup (i915 tc_phy_disconnect order): AUX well off, PHY ownership back, then power well 2 if we turned it
++// on. The second test left DDI_BUF_CTL=0xc0, PW_AUX2=0xc3 and PW2 on after the dock was removed (Apple's fallback to
++// mode 0 does not come through our hook), and the fan went to 100% until a forced power-off.
++static volatile UInt32 gTc1Pw2Ours = 0, gTc1Releases = 0;
++static volatile UInt32 gTc1GateOurs = 0;   // stage 3e: we cleared the DPCLKA_CFGCR0 TC clock gate
++// Stage 3y (ngreentc1=27): hot unplug with a lit picture -> ~8 s later "Cmd queue ... timed out waiting for prior
++// signals" + checkGPUProgress hardware error (GPU hang, frozen screen). The unplug hotplug hook released the port
++// (DDI_BUF enable off, AUX/DDI IO wells, PHY ownership, TC clock gate) right after Apple's handler, but Apple only
++// notifies AGDC there; WindowServer disables FB2 (disableDisplay) later. Pulling the DDI from under a running transcoder
++// stops pipe B's frames, and GPU work waiting on FB2 flips/vblanks never completes. From 27 on: while TRANSCONF of the
++// TC1 pipe is enabled, don't release - retry every 250 ms (max 20 s) until Apple has turned the pipe off.
++volatile uint32_t gTc1PipeForRel = 0xff;   // pipe of the TC1 path (stage 3y)
++static thread_call_t gTc1RelTc = nullptr;
++static volatile UInt32 gTc1RelDeferred = 0, gTc1RelTries = 0;
++static void xeTc1Release(const char *why);
++static void xeTc1RelRetry(thread_call_param_t, thread_call_param_t) { xeTc1Release("deferred"); }
++static bool xeTc1PipeBusy() {
++	const uint32_t pipe = gTc1PipeForRel;
++	return pipe < 3 && (NGreen::callback->readReg32(0x70008 + 0x1000 * pipe) & 0x80000000);
++}
++static void xeTc1Release(const char *why) {
++	if (!gTc1 || !NGreen::callback) return;
++	if (gTc1 && xeTc1PipeBusy()) {
++		const uint32_t st = NGreen::callback->readReg32(0x161500 + 4 * (gTc1Ddi - 3));
++		if (st == 0xffffffff || (st & 3) != 1) {   // cable gone, pipe still on: wait for Apple's disableDisplay
++			if (!gTc1RelTc) gTc1RelTc = thread_call_allocate(xeTc1RelRetry, nullptr);
++			if (gTc1RelTc && OSIncrementAtomic(&gTc1RelTries) < 80) {
++				OSIncrementAtomic(&gTc1RelDeferred);
++				uint64_t dl; clock_interval_to_deadline(250, kMillisecondScale, &dl);
++				thread_call_enter_delayed(gTc1RelTc, dl);
++				return;
++			}
++		} else return;
++	}
++	gTc1RelTries = 0;
++	const uint32_t buf = 0x64000 + 0x100 * gTc1Ddi, areq = 2u << (2 * gTc1Ddi), ast = 1u << (2 * gTc1Ddi);
++	uint32_t b0 = xeTc1Rd(buf);
++	const uint32_t a0 = xeTc1Rd(0x45444), p0 = xeTc1Rd(0x45404);
++	if (b0 & 0x80000000) {
++		// DDI still enabled: only take it down when the cable is really gone (a failed bring-up can leave bit 31 set
++		// and then nothing would ever be released); otherwise never pull the PHY from under a live link.
++		const uint32_t st = xeTc1Rd(0x161500 + 4 * (gTc1Ddi - 3));
++		if (st != 0xffffffff && (st & 3) == 1) return;
++		NGreen::callback->writeReg32(buf, b0 & ~0x80000000u);
++		for (uint32_t i = 0; !(xeTc1Rd(buf) & 0x80) && i < 40; i++) IODelay(100);
++		b0 = xeTc1Rd(buf);
++	}
++	if (!(b0 & 0x40) && !(a0 & areq) && !gTc1Pw2Ours) return;
++	if (a0 & areq) {
++		NGreen::callback->writeReg32(0x45444, a0 & ~areq);
++		for (uint32_t i = 0; (xeTc1Rd(0x45444) & ast) && i < 20; i++) IOSleep(1);
++	}
++	{
++		const uint32_t dreq = 2u << (2 * gTc1Ddi), dv = xeTc1Rd(0x45454);
++		if (gTc1 && (dv & dreq)) NGreen::callback->writeReg32(0x45454, dv & ~dreq);
++	}
++	if (b0 & 0x40) NGreen::callback->writeReg32(buf, b0 & ~0x40u);
++	if (gTc1) {
++		for (uint32_t pipe = 0; pipe < 3; pipe++) {
++			const uint32_t fn = 0x60400 + 0x1000 * pipe, clk = 0x46140 + 4 * pipe, f = xeTc1Rd(fn), c = xeTc1Rd(clk);
++			if (!(f & 0x80000000) && (f & 0x78000000) == ((gTc1Ddi + 1) << 27)) NGreen::callback->writeReg32(fn, f & ~0x7F00000Eu);
++			if (!(f & 0x80000000) && (c >> 28) == gTc1Ddi + 3) NGreen::callback->writeReg32(clk, c & 0x0fffffff);
++		}
++	}
++	if (gTc1GateOurs) {
++		const uint32_t g = xeTc1Rd(0x164280), gb = 1u << (12 + (gTc1Ddi - 3));
++		if (!(g & gb)) NGreen::callback->writeReg32(0x164280, g | gb);
++		gTc1GateOurs = 0;
++	}
++	const uint32_t cs = xeTc1Rd(0x163894), bit = 1u << (gTc1Ddi - 3);
++	if (cs != 0xffffffff && (cs & bit)) NGreen::callback->writeReg32(0x163894, cs & ~bit);
++	// PW2: only if we requested it and nothing else in it is requested (DDI/AUX wells above index 0, PW_A.. wells)
++	if (gTc1Pw2Ours && !(xeTc1Rd(0x45444) & ~0x3u) && !(xeTc1Rd(0x45454) & ~0x3u) && !(xeTc1Rd(0x45404) & 0xfffff000)) {
++		NGreen::callback->writeReg32(0x45404, xeTc1Rd(0x45404) & ~0x8u);
++		gTc1Pw2Ours = 0;
++	}
++	gTc1Owned = 0;
++	const UInt32 n = OSIncrementAtomic(&gTc1Releases);
++	snprintf(gTc1RelDiag, sizeof(gTc1RelDiag), "#%u %s: DDI_BUF %x->%x PW_AUX2 %x->%x PW_CTL2 %x->%x DPCSSS %x->%x", (unsigned)(n + 1), why,
++			 b0, xeTc1Rd(buf), a0, xeTc1Rd(0x45444), p0, xeTc1Rd(0x45404), cs, xeTc1Rd(0x163894));
++	if (n < 24) IOLog("XeNG TC1 release %s\n", gTc1RelDiag);
++}
++static void xeTc1SetPortMode(void *that, uint32_t mode) {
++	auto *pc = that ? *reinterpret_cast<uint8_t **>(reinterpret_cast<uint8_t *>(that) + 0x548) : nullptr;
++	if (!gTc1 || !pc || *reinterpret_cast<uint32_t *>(pc) != gTc1Ddi || !NGreen::callback) {
++		FunctionCast(xeTc1SetPortMode, gTc1OrgSetMode)(that, mode);
++		return;
++	}
++	const uint32_t buf = 0x64000 + 0x100 * gTc1Ddi, tcss = 0x161500 + 4 * (gTc1Ddi - 3);
++	const UInt32 n = OSIncrementAtomic(&gTc1Sets);
++	if (mode == 3) {
++		// Stage 2b: on ADL-P the Type-C DDI and AUX registers sit in power well 2 (first test: PW_CTL2=0xc03, PW2
++		// off, and the DDI_BUF_CTL ownership write read back 0). Leave DC5/6, request PW2, wait for state + fuse.
++		// Not (or no longer) a DP-alt connection: don't run Apple's connect path at all, go to mode 0 and clean up.
++		{
++			const uint32_t st = xeTc1Rd(tcss);
++			if (st == 0xffffffff || (st & 3) != 1) {
++				FunctionCast(xeTc1SetPortMode, gTc1OrgSetMode)(that, 0);
++				xeTc1Release("set(3) without alt-mode HPD");
++				return;
++			}
++		}
++		const uint32_t dc0 = xeTc1Rd(0x45504), p0 = xeTc1Rd(0x45404);
++		if (dc0 & 3) {
++			NGreen::callback->dcExit("tc1");
++			const uint32_t dc1 = xeTc1Rd(0x45504);
++			if (dc1 & 3) NGreen::callback->writeReg32(0x45504, dc1 & ~3u);
++		}
++		if (!(p0 & 0x8)) { NGreen::callback->writeReg32(0x45404, xeTc1Rd(0x45404) | 0x8); gTc1Pw2Ours = 1; }
++		uint32_t pw2ms = 0;
++		while (!((xeTc1Rd(0x45404) & 0x4) && (xeTc1Rd(0x42000) & (1u << 25))) && pw2ms < 100) { IOSleep(1); pw2ms++; }
++		const uint32_t p1 = xeTc1Rd(0x45404), fuse = xeTc1Rd(0x42000);
++		const uint32_t b0 = xeTc1Rd(buf), s0 = xeTc1Rd(tcss);
++		uint32_t waited = 0;
++		const bool alt = s0 != 0xffffffff && (s0 & 3) == 1;   // DP alt mode live, not TBT
++		if (alt) {
++			if (!(b0 & 0x40)) NGreen::callback->writeReg32(buf, b0 | 0x40);
++			gTc1Owned = 1;
++			while (!(xeTc1Rd(tcss) & 4) && waited < 500) { IOSleep(1); waited++; }
++		}
++		const uint32_t b1 = xeTc1Rd(buf), s1 = xeTc1Rd(tcss);
++		gTc1Switching = alt ? 1 : 0;
++		FunctionCast(xeTc1SetPortMode, gTc1OrgSetMode)(that, mode);
++		gTc1Switching = 0;
++		// AUX well for USBC1 (PWR_WELL_CTL_AUX2 index = ddi: request bit 2*ddi+1, state bit 2*ddi) and the AUX
++		// channel routed to the PHY, not Thunderbolt (DP_AUX_CH_CTL bit 11 clear). Only if Apple's call left it off.
++		const uint32_t a0 = xeTc1Rd(0x45444), areq = 2u << (2 * gTc1Ddi), ast = 1u << (2 * gTc1Ddi);
++		uint32_t auxms = 0;
++		if (alt && *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(that) + 0x550) == 3) {
++			const uint32_t ac = xeTc1Rd(0x64010 + 0x100 * gTc1Ddi);
++			if (ac != 0xffffffff && (ac & (1u << 11)) && !(ac & (1u << 31)))
++				NGreen::callback->writeReg32(0x64010 + 0x100 * gTc1Ddi, ac & ~((1u << 11) | (1u << 30) | (1u << 28) | (1u << 25)));
++			if (!(a0 & areq)) NGreen::callback->writeReg32(0x45444, a0 | areq);
++			while (!(xeTc1Rd(0x45444) & ast) && auxms < 50) { IOSleep(1); auxms++; }
++		}
++		snprintf(gTc1PwrDiag, sizeof(gTc1PwrDiag), "dc %x->%x PW_CTL2 %x->%x (%ums) fuse=%x | PW_AUX2 %x->%x (%ums) PW_DDI2=%x",
++				 dc0, xeTc1Rd(0x45504), p0, p1, pw2ms, fuse, a0, xeTc1Rd(0x45444), auxms, xeTc1Rd(0x45454));
++		if (gTc1Dbg && n < 24) IOLog("XeNG TC1 pwr %s\n", gTc1PwrDiag);
++		snprintf(gTc1ModeDiag, sizeof(gTc1ModeDiag),
++				 "set(3)#%u alt=%d DDI_BUF %x->%x->%x TCSS %x->%x wait=%ums fake=%u => portmode=%u PW_AUX2=%x DPCSSS=%x AUX_CTL=%x",
++				 (unsigned)(n + 1), (int)alt, b0, b1, xeTc1Rd(buf), s0, s1, waited, (unsigned)gTc1FakeReads,
++				 *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(that) + 0x550), xeTc1Rd(0x45444),
++				 xeTc1Rd(0x163894), xeTc1Rd(0x64310));
++		if (gTc1Dbg && n < 24) IOLog("XeNG TC1 %s\n", gTc1ModeDiag);
++		return;
++	}
++	FunctionCast(xeTc1SetPortMode, gTc1OrgSetMode)(that, mode);
++	if (mode == 0 && !gTc1Switching) xeTc1Release("set(0)");
++}
++// ---- USB-C stage 3a (ngreentc1=3): Dekel (Type-C) PHY register access ------------------------------------------------
++// Stage 2 result: with AUX working Apple's DP path runs, and every PHY access fails ("Invalid register access at
++// offset = c3a120d4 ..."), then "MG PLL lock failed". AppleIntelPortHAL::Read/WriteDekelPhyReg(index) take raw =
++// port[0x580 + 4*index], write (raw >> 14) & 3 to HIP_INDEX (0x1010a0) and access 0x165000 + ddi*0x1000 + (raw & ~0xc000)
++// through a second register view (gController+0xca0) that is not valid here. The raw table (indexes 0x34..0x49) is
++// i915's Dekel list: {bank(15:12), offset(11:0)} for PHY registers, plus the PLL enable register and three absolute
++// 0x1682xx placeholders. Same resolution as b00t0x/WhateverXe (Display13TC::Dekel, BSD-3) and i915 intel_dkl_phy.c:
++//   PHY register  = 0x168000 + 0x1000*tc + (internal & 0xfff), HIP_INDEX_REG0 byte tc = internal >> 12
++//   index 0x38    = PLL enable, direct: ADL-P ADLP_PORTTC_PLL_ENABLE = 0x46038 + 8*tc (TGL: 0x46030 + 4*tc)
++//   0x3c..0x3e    = internal 0x2210 + 4*(index - 0x3c)  (PLL SSC, BIAS, TDC_COLDST_BIAS)
++// Anything that doesn't match the table exactly goes to Apple's original.
++static mach_vm_address_t gTc1OrgDklRead = 0, gTc1OrgDklWrite = 0;
++static IOSimpleLock *gTc1DklLock = nullptr;
++static volatile UInt32 gTc1DklReads = 0, gTc1DklWrites = 0, gTc1DklPass = 0, gTc1DklBad = 0;
++static volatile uint32_t gTc1PllLast = 0;
++static char gTc1DklDiag[420] = {};
++static bool xeTc1DklResolve(void *that, uint32_t index, uint32_t &tc, uint32_t &offset, uint32_t &bank, bool &direct) {
++	static const uint32_t table[] = {0x20D4, 0x20D8, 0x2130, 0x212C, 0x46030, 0x2200, 0x2204, 0x2208, 0x168210, 0x168214,
++		0x168218, 0x220C, 0x2244, 0x224C, 0x2C0, 0x2C4, 0x2C8, 0x12C0, 0x12C4, 0x12C8, 0xA0, 0x10A0};
++	if (!gTc1 || !that || !gTc1DklLock || index < 0x34 || index > 0x49) return false;
++	auto *pc = *reinterpret_cast<uint8_t **>(reinterpret_cast<uint8_t *>(that) + 0x548);
++	if (!pc) return false;
++	const uint32_t ddi = *reinterpret_cast<uint32_t *>(pc);
++	if (ddi < 3 || ddi > 6) return false;
++	const uint32_t raw = *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(that) + 0x580 + 4 * index);
++	if (raw != table[index - 0x34]) { OSIncrementAtomic(&gTc1DklBad); return false; }
++	tc = ddi - 3;
++	direct = index == 0x38;
++	const uint32_t internal = (index >= 0x3C && index <= 0x3E) ? 0x2210 + 4 * (index - 0x3C) : raw;
++	bank = (internal >> 12) & 0xf;
++	offset = direct ? 0x46038 + 8 * tc : 0x168000 + 0x1000 * tc + (internal & 0xfff);
++	return true;
++}
++static uint32_t xeTc1DklWriteMask(uint32_t index) {
++	switch (index) {
++		case 0x39: return 0x001FFFFF; case 0x3A: return 0x001F00FF;
++		case 0x3C: return 0xE0FF3A00; case 0x3D: return 0x7FFFFF00; case 0x3E: return 0x0000FFFF;
++		default: return 0xFFFFFFFF;
++	}
++}
++// One PHY access with the shared HIP index selected and restored under a lock with interrupts off.
++static uint32_t xeTc1DklAccess(uint32_t tc, uint32_t offset, uint32_t bank, bool direct, bool write, uint32_t index, uint32_t value, uint32_t &before) {
++	const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(gTc1DklLock);
++	uint32_t hip = 0, sel = 0;
++	if (!direct) {
++		hip = NGreen::callback->readReg32(0x1010A0);
++		sel = (hip & ~(0xfu << (8 * tc))) | (bank << (8 * tc));
++		if (sel != hip) NGreen::callback->writeReg32(0x1010A0, sel);
++	}
++	before = NGreen::callback->readReg32(offset);
++	uint32_t after = before;
++	if (write) {
++		const uint32_t mask = xeTc1DklWriteMask(index);
++		NGreen::callback->writeReg32(offset, (before & ~mask) | (value & mask));
++		after = NGreen::callback->readReg32(offset);
++	}
++	if (!direct && sel != hip) NGreen::callback->writeReg32(0x1010A0, hip);
++	IOSimpleLockUnlockEnableInterrupt(gTc1DklLock, irq);
++	return after;
++}
++// ---- USB-C stage 3n (ngreentc1=16): keep the light-up link at HBR2 -------------------------------------------------
++// 3l/3m: the AGDC pre-training at HBR2 x2 passes (CR, EQ, align), the light-up retrains at HBR x2 and channel EQ never
++// completes, with or without the ADL-P rate field. Instead of debugging HBR, run the light-up at the rate that trains:
++//  - cache the Dekel PLL words Apple writes for HBR2 (port+0x128 == 0x14) and substitute them when it programs HBR;
++//  - rewrite DPCD LINK_BW_SET 0x0a -> 0x14 on the way to the sink (DDI_BUF rate field follows, stage 3m);
++//  - double DATA_N1 / LINK_N1 of the TC1 transcoder (M/N were computed for the 270 MHz link clock; now 540 MHz).
++static const uint8_t kTc1PllIdx[] = {0x34, 0x35, 0x37, 0x39, 0x3a, 0x3c, 0x3d, 0x3e};
++static uint32_t gTc1Hbr2Pll[8] = {};
++static volatile uint32_t gTc1Hbr2Mask = 0, gTc1ForceN = 0, gTc1ForceBw = 0, gTc1ForcePll = 0, gTc1Pipe = 0xff;
++static void *volatile gTc1PortObj = nullptr;
++static inline int xeTc1PllSlot(uint32_t idx) { for (int i = 0; i < 8; i++) if (kTc1PllIdx[i] == idx) return i; return -1; }
++static inline bool xeTc1PortRate(void *port, uint32_t rate) { return port && *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x128) == rate; }
++static inline bool xeTc1ForceActive(void *port) { return gTc1 && gTc1Hbr2Mask == 0xff && xeTc1PortRate(port, 0x0a); }
++static void xeTc1DklNote(bool write, uint32_t index, uint32_t offset, uint32_t bank, uint32_t value, uint32_t before, uint32_t after) {
++	static volatile UInt32 logged = 0;
++	static size_t used = 0;
++	if (index == 0x38) gTc1PllLast = after;
++	if (!write) return;
++	const UInt32 n = OSIncrementAtomic(&logged);
++	if (gTc1Dbg && n < 80) IOLog("XeNG TC1 dkl W idx=%x reg=%x bank=%u val=%x: %x -> %x\n", index, offset, bank, value, before, after);
++	if (n < 28 && used + 16 < sizeof(gTc1DklDiag))   // compact trail of the first writes for ioreg
++		used += snprintf(gTc1DklDiag + used, sizeof(gTc1DklDiag) - used, "%x:%x>%x ", index, value, after);
++}
++static uint32_t xeTc1DklRead(void *that, uint32_t index) {
++	uint32_t tc = 0, offset = 0, bank = 0, before = 0; bool direct = false;
++	if (!xeTc1DklResolve(that, index, tc, offset, bank, direct)) {
++		OSIncrementAtomic(&gTc1DklPass);
++		return FunctionCast(xeTc1DklRead, gTc1OrgDklRead)(that, index);
++	}
++	OSIncrementAtomic(&gTc1DklReads);
++	const uint32_t v = xeTc1DklAccess(tc, offset, bank, direct, false, index, 0, before);
++	xeTc1DklNote(false, index, offset, bank, 0, before, v);
++	return v;
++}
++// ---- USB-C stage 3h (ngreentc1=10): both Dekel lane groups ------------------------------------------------------
++// 3g DPCD trace: the sink is asked for 2 lanes (DPCD 0x101 = 0x82) and only its LANE 1 ever reaches CR_DONE
++// (0x202 = 0x10); with 1 lane neither lane locks. Apple's TGL code programs only Dekel lane group 0: DP_MODE ln0 =
++// X1|X2 and ungated, ln1 left with no mode and clock-gated, and the swing (TX_DPCNTL0/1/2) only on group 0. With USB-C
++// pin assignment D (FIA DFLEXPA1 nibble = 4) i915 (icl_program_mg_dp_mode, tgl_dkl_phy_set_signal_levels) and
++// WhateverXe (TGLDklDPMode::select) set the mux on BOTH groups (x1 -> 0x40, x2 -> 0x80) and program both groups' drive.
++// So: DP_MODE writes get the pin-assignment mux on ln0 and ln1, ln1 follows ln0's clock gating, and every group-0
++// drive write (idx 0x42..0x44) is repeated on group 1 (internal + 0x1000).
++static volatile uint32_t gTc1Ln0Gate = 0x3e, gTc1Mux = 0;
++// Stage 3j (ngreentc1=12): 3i trace - first attempt really is 2 lanes on both ends (DPCD 0x101 = 0x80 | port+0x124 = 0x82)
++// and sink lane 1 locks while lane 0 never does. i915 tgl_dkl_phy_set_signal_levels and WhateverXe DPSignal::program
++// write DKL_TX_PMD_LANE_SUS (lane-group bank, 0xd00) = 0 before each group's drive settings; Apple's Dekel table has no
++// 0xd00 entry, so a suspended TX lane stays suspended. Clear it on both groups with the first drive write.
++static volatile uint32_t gTc1Sus[2] = {0xffffffff, 0xffffffff};
++static uint32_t xeTc1PinMux(void *port, uint32_t group) {
++	const uint32_t tc = gTc1Ddi - 3, pin = (xeTc1Rd(tc < 2 ? 0x163880 : 0x16e880) >> (4 * (tc & 1))) & 0xf;
++	const uint32_t lanes = *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x124);
++	uint32_t m[2] = {0, 0};
++	switch (pin) {
++		case 0: if (lanes == 1) m[1] = 0x40; else m[0] = m[1] = 0x80; break;
++		case 1: if (lanes == 4) m[0] = m[1] = 0x80; break;
++		case 2: if (lanes == 2) m[0] = m[1] = 0x80; break;
++		default: m[0] = m[1] = lanes == 1 ? 0x40 : 0x80; break;
++	}
++	gTc1Mux = (pin << 16) | (lanes << 8) | m[group & 1];
++	return m[group & 1];
++}
++static void xeTc1DklWrite(void *that, uint32_t index, uint32_t value) {
++	uint32_t tc = 0, offset = 0, bank = 0, before = 0; bool direct = false;
++	if (!xeTc1DklResolve(that, index, tc, offset, bank, direct)) {
++		OSIncrementAtomic(&gTc1DklPass);
++		FunctionCast(xeTc1DklWrite, gTc1OrgDklWrite)(that, index, value);
++		return;
++	}
++	OSIncrementAtomic(&gTc1DklWrites);
++	if (gTc1) {
++		gTc1PortObj = that;
++		const int slot = xeTc1PllSlot(index);
++		if (slot >= 0 && xeTc1PortRate(that, 0x14)) { gTc1Hbr2Pll[slot] = value; OSBitOrAtomic(1u << slot, &gTc1Hbr2Mask); }
++		else if (slot >= 0 && xeTc1ForceActive(that)) { value = gTc1Hbr2Pll[slot]; OSIncrementAtomic(&gTc1ForcePll); }
++	}
++	if (gTc1 && (index == 0x48 || index == 0x49)) {
++		if (index == 0x48) gTc1Ln0Gate = value & 0x3e;
++		value = (value & ~0xffu) | xeTc1PinMux(that, index - 0x48) | gTc1Ln0Gate;
++	}
++	const uint32_t after = xeTc1DklAccess(tc, offset, bank, direct, true, index, value, before);
++	xeTc1DklNote(true, index, offset, bank, value, before, after);
++	if (gTc1) {
++		if (index == 0x48) {   // keep ln1 in step with ln0 (gating + mux)
++			uint32_t t2 = 0, o2 = 0, b2 = 0, bf = 0; bool d2 = false;
++			if (xeTc1DklResolve(that, 0x49, t2, o2, b2, d2)) {
++				uint32_t cur = 0; xeTc1DklAccess(t2, o2, b2, d2, false, 0x49, 0, cur);
++				const uint32_t v1 = (cur & ~0xffu) | xeTc1PinMux(that, 1) | gTc1Ln0Gate;
++				const uint32_t a1 = xeTc1DklAccess(t2, o2, b2, d2, true, 0x49, v1, bf);
++				xeTc1DklNote(true, 0x49, o2, b2, v1, bf, a1);
++			}
++		}
++		if (gTc1 && index == 0x42) {
++			for (uint32_t g = 0; g < 2; g++) {
++				uint32_t bf = 0;
++				const uint32_t off = 0x168000 + 0x1000 * tc + 0xd00;
++				xeTc1DklAccess(tc, off, g, false, true, 0xff, 0, bf);
++				if (gTc1Sus[g] == 0xffffffff) gTc1Sus[g] = bf;
++			}
++		}
++		if (index >= 0x42 && index <= 0x44) {   // same drive settings on lane group 1
++			const uint32_t off1 = offset;   // same offset, bank + 1 (internal 0x12c0.. = bank 1, offset 0x2c0..)
++			const uint32_t a1 = xeTc1DklAccess(tc, off1, bank + 1, false, true, index, value, before);
++			xeTc1DklNote(true, index + 3, off1, bank + 1, value, before, a1);
++		}
++	}
++}
++static void xeTc1PublishDkl(IOService *svc) {
++	if (!gTc1 || !svc) return;
++	char b[260];
++	snprintf(b, sizeof(b), "reads=%u writes=%u passthrough=%u tablemismatch=%u sus0=%x sus1=%x mux=%x pll(0x46038)=%x live=%x DDI_BUF=%x PW_DDI2=%x CLKSEL=%x",
++			 (unsigned)gTc1DklReads, (unsigned)gTc1DklWrites, (unsigned)gTc1DklPass, (unsigned)gTc1DklBad, gTc1Sus[0], gTc1Sus[1], gTc1Mux, gTc1PllLast,
++			 xeTc1Rd(0x46038 + 8 * (gTc1Ddi - 3)), xeTc1Rd(0x64000 + 0x100 * gTc1Ddi), xeTc1Rd(0x45454), xeTc1Rd(0x46100 + 4 * gTc1Ddi));
++	svc->setProperty("ngreen-tc1-dkl", b);
++	if (gTc1DklDiag[0]) svc->setProperty("ngreen-tc1-dkl-writes", gTc1DklDiag);
++}
++// ---- USB-C stage 3c (ngreentc1=5): give the TC1 port a display path before link training -------------------------
++// AGDC (displaypolicyd) calls doLinkTraining -> AppleIntelPort::linkTraining(cfg) before it commits resources, and on
++// this FB linkTraining needs a path (DP_TP_CTL is per transcoder: AppleIntelDisplayPath::setLinkTrainingPattern), so it
++// returns "Port is not associated to any path" forever. The FB has its own allocator for exactly one fb<->port pair:
++// AppleIntelFramebuffer::allocateBootDisplayResources(port->0x120) (bzero a resource set {1, fbIndex, valid,
++// port+1}, commitResourceConfigurationSet, setupDisplayResources), used for the built-in panel from connectionProbe.
++// Here, in the same AGDC user-client context as a normal commit: first linkTraining on the TC1 port without a path
++// -> allocate for framebuffer gTc1Fb, then run Apple's training.
++static mach_vm_address_t gTc1OrgLinkTrain = 0, gTc1PathByPort = 0, gTc1AllocBoot = 0, gTc1GController = 0;
++static volatile UInt32 gTc1Trains = 0, gTc1Allocs = 0;
++static volatile uint32_t gTc1LastTrain = 0xffffffff;
++static char gTc1PathDiag[220] = {};
++// ---- USB-C stage 3d (ngreentc1=6): DDI IO power + DDI_BUF_CTL enable wait ----------------------------------------
++// 3c result: path allocated, training starts, AppleIntelPortHAL::enablePort sets DDI_BUF_CTL bit 31 and polls the
++// idle bit (7) for only 100 x 5 us: "Failed to enable port" (30x). PWR_WELL_CTL_DDI2 was 0x3: the DDI IO well of the
++// Type-C port (index = ddi: request bit 2*ddi+1, state 2*ddi) is never requested, and i915 gives a Type-C DDI 3 ms.
++static mach_vm_address_t gTc1OrgEnablePort = 0;
++static volatile UInt32 gTc1Enables = 0, gTc1EnableOk = 0;
++static char gTc1EnDiag[260] = {};
++static bool xeTc1DdiIoOn() {
++	const uint32_t req = 2u << (2 * gTc1Ddi), st = 1u << (2 * gTc1Ddi);
++	const uint32_t v = xeTc1Rd(0x45454);
++	if (!(v & req)) NGreen::callback->writeReg32(0x45454, v | req);
++	for (uint32_t i = 0; !(xeTc1Rd(0x45454) & st) && i < 50; i++) IOSleep(1);
++	return (xeTc1Rd(0x45454) & st) != 0;
++}
++// Stage 3e (ngreentc1=7): 3d showed DDI IO on, TC PLL locked (0x46038=0xcc000000), DDI_CLK_SEL=MG, yet DDI_BUF_CTL
++// never left idle in 5 ms. Three ADL-P differences from the TGL code (i915 intel_ddi.c, WhateverXe tc_clock/tc_dp):
++//  (1) DPCLKA_CFGCR0 (0x164280) bit 12+tc gates the TC port clock; it was still set (0x1e07801). Clear it once the PLL
++//      is locked and DDI_CLK_SEL selects the MG/TC PLL; set it again on release.
++//  (2) adlp_tbt_to_dp_alt_switch_wa: release the PCS core soft reset (DKL_PCS_DW5 = PHY bank ln offset 0x14, bit 11)
++//      on both lanes before the DDI buffer is enabled.
++//  (3) The link rate goes in DDI_BUF_CTL bits 22:20 (0 = 1.62, 1 = 2.7, 2 = 5.4, 3 = 8.1 Gbps); the TGL driver writes it
++//      into bits 15:8 (lane stagger on ADL-P). Rewrite the register that way and wait up to 5 ms for the idle bit.
++static uint32_t xeTc1EnablePort(void *port) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (!gTc1 || !pc || pc[0] != gTc1Ddi) return FunctionCast(xeTc1EnablePort, gTc1OrgEnablePort)(port);
++	const uint32_t tc = gTc1Ddi - 3, buf = 0x64000 + 0x100 * gTc1Ddi, gate = 1u << (12 + tc);
++	const uint32_t d0 = xeTc1Rd(0x45454), b0 = xeTc1Rd(buf), g0 = xeTc1Rd(0x164280);
++	const bool io = xeTc1DdiIoOn();
++	uint32_t pcs[2] = {0xffffffff, 0xffffffff};
++	bool gated = false;
++	if (gTc1) {
++		const uint32_t pll = xeTc1Rd(0x46038 + 8 * tc), sel = xeTc1Rd(0x46100 + 4 * gTc1Ddi);
++		if ((pll & 0xc0000000) == 0xc0000000 && (sel >> 28) == 8 && (g0 & gate)) {
++			NGreen::callback->writeReg32(0x164280, g0 & ~gate);
++			gated = true;
++			gTc1GateOurs = 1;
++		}
++		if (!(b0 & 0x80000000) && gTc1DklLock) {
++			for (uint32_t ln = 0; ln < 2; ln++) {
++				uint32_t before = 0;
++				const uint32_t v = xeTc1DklAccess(tc, 0x168000 + 0x1000 * tc + 0x14, ln, false, false, 0, 0, before);
++				pcs[ln] = v;
++				if (v != 0xffffffff && (v & 0x800)) xeTc1DklAccess(tc, 0x168000 + 0x1000 * tc + 0x14, ln, false, true, 0, v & ~0x800u, before);
++			}
++		}
++	}
++	uint32_t r = FunctionCast(xeTc1EnablePort, gTc1OrgEnablePort)(port);
++	const uint32_t b1 = xeTc1Rd(buf);
++	uint32_t us = 0, code = 0xff, b2 = b1;
++	if (r == 0xe00002d6 && (b1 & 0x80000000)) {
++		while ((xeTc1Rd(buf) & 0x80) && us < 5000) { IODelay(50); us += 50; }
++		if (!(xeTc1Rd(buf) & 0x80)) r = 0;
++	}
++	const UInt32 n = OSIncrementAtomic(&gTc1Enables);
++	if (!r) OSIncrementAtomic(&gTc1EnableOk);
++	snprintf(gTc1EnDiag, sizeof(gTc1EnDiag), "#%u ok=%u PW_DDI2 %x->%x io=%d gate %x->%x(%d) pcs %x/%x rate=%u DDI_BUF %x->%x->%x->%x wait=%uus ret=0x%x TCPLL=%x CLKSEL=%x",
++			 (unsigned)(n + 1), (unsigned)gTc1EnableOk, d0, xeTc1Rd(0x45454), (int)io, g0, xeTc1Rd(0x164280), (int)gated, pcs[0], pcs[1], code,
++			 b0, b1, b2, xeTc1Rd(buf), us, r, xeTc1Rd(0x46038 + 8 * tc), xeTc1Rd(0x46100 + 4 * gTc1Ddi));
++	if (gTc1Dbg && n < 12) IOLog("XeNG TC1 enablePort %s\n", gTc1EnDiag);
++	return r;
++}
++// ---- USB-C stage 3f (ngreentc1=8): transcoder route before link training ------------------------------------------
++// 3e: TC clock ungated, PCS out of reset, PLL locked, DDI IO on, and DDI_BUF_CTL still never left idle. Apple's TGL code
++// writes TRANS_CLK_SEL only in LightUpDP, AFTER linkTraining, and DP_TP_CTL / the DDI buffer need the transcoder clock and
++// the DDI route first (i915 tgl_ddi_pre_enable_dp steps 7a-7c; WhateverXe wrapTGLTrainingPattern does the same). So on
++// setLinkTrainingPattern(1) for the TC1 path: TRANS_CLK_SEL[pipe] = PHY clock, TRANS_DDI_FUNC_CTL[pipe] = DDI select,
++// DP SST, lane count (not enabled). ADL-P selects the transcoder clock by PHY (TC1 = PHY F = 6, Linux wrote 0x60000000),
++// TGL by port (TC1 = D = 4, what Apple writes): translate that value on every TRANS_CLK_SEL write as well.
++static mach_vm_address_t gTc1OrgTrainPat = 0;
++static volatile UInt32 gTc1Routes = 0, gTc1ClkFix = 0;
++static char gTc1RouteDiag[220] = {};
++// Called from Gen11::raWriteRegister32 (NootedGreen already routes RegisterAccessManager::WriteRegister32; a second
++// route on the same function is a Lilu boot panic: "previous plugin had short jump type on a multiroute function").
++// Stage 3m (ngreentc1=15): 3l trace - training passes at HBR2 x2 (CR + EQ + align) but the light-up retrains at HBR x2
++// and channel EQ never completes ("Phase 2 of link training failed"). Apple writes DDI_BUF_CTL = 0x80001c42: TGL layout,
++// bits 22:20 = 0. On ADL-P those bits are DDI_BUF_PHY_LINK_RATE (i915 ddi_buf_phy_link_rate: RBR 0, HBR 1, HBR2 2,
++// HBR3 3; Linux wrote 0x80203642 at HBR2) and the Dekel TX uses them. Fill them from the LINK_BW_SET just written to
++// the sink, on every DDI_BUF_CTL write for the TC1 port.
++extern volatile uint32_t gTc1LinkBw;
++static volatile UInt32 gTc1RateFix = 0;
++static volatile uint32_t gTc1RateLast = 0;
++// Stage 3o (ngreentc1=17): 3n result - link trained at HBR2 x2 (twice, last=0), TRANSCONF_B = 0xc0000000, DDI_BUF
++// 0x80201c42 active, sink 0x202..0x204 = 77 00 01, no symbol errors, macOS lists "LG ULTRAWIDE 1920x1080" - but the
++// monitor shows no picture, and only ONE of DATA_N1/LINK_N1 got doubled (force n=1). Record every write Apple makes to
++// the TC1 transcoder (M/N, DP_TP_CTL, TRANS_DDI_FUNC_CTL, TRANSCONF, timings) and double both N values whenever the
++// light-up was forced to HBR2 (gTc1ForceBw) or will be (force active), whichever comes first.
++static char gTc1TransTrail[700] = {};
++static volatile UInt32 gTc1EfFix = 0;
++extern volatile uint32_t gTc1LaneSet;
++static volatile UInt32 gTc1TransN = 0;
++static void xeTc1TransNote(unsigned long reg, uint32_t before, uint32_t after) {
++	static size_t used = 0;
++	if (OSIncrementAtomic(&gTc1TransN) >= 48 || used + 24 >= sizeof(gTc1TransTrail)) return;
++	used += snprintf(gTc1TransTrail + used, sizeof(gTc1TransTrail) - used, before == after ? "%lx:%x " : "%lx:%x>%x ", reg & 0xfffff, before, after);
++}
++uint32_t xeTc1FixWrite(unsigned long reg, uint32_t val) {
++	if (gTc1 && gTc1Pipe < 3) {
++		const uint32_t base = 0x60000 + 0x1000 * gTc1Pipe;
++		const bool trans = (reg >= base && reg < base + 0x100) || reg == base + 0x400 || reg == base + 0x540 ||
++						   reg == 0x70008 + 0x1000 * gTc1Pipe;
++		if (trans) {
++			const uint32_t in = val;
++			// 3o trail: DATA_M1 0x7e699999 / DATA_N1 0x800000 (= 0.825, the HBR ratio; N could not be doubled, it would
++			// overflow 24 bits) and LINK 0x46666 / 0x80000 -> 0x100000 (0.275, right for HBR2). From ngreentc1=18 halve
++			// both M values instead (TU size in DATA_M1 bits 30:25 kept); 17 keeps the N doubling.
++			// Stage 3r (ngreentc1=20): 3q live snapshot - pipe B scans (3 frames / 50 ms), plane 1B enabled XRGB8888 1920x1080,
++			// M/N right, DP_TP_CTL = 0x80000300 (normal pixels) - but bit 18 (enhanced framing) is clear while the sink was
++			// told LANE_COUNT_SET = 0x82 (enhanced framing on). Training patterns don't use framing, the pixel stream does:
++			// the sink can't decode the main link. Set DP_TP_CTL bit 18 whenever the sink was set to enhanced framing
++			// (WhateverXe XELP::SSTProgram::framing does the same).
++			if (gTc1 && reg == base + 0x540 && (val & 0x80000000) && (gTc1LaneSet & 0x80) && !(val & (1u << 18))) {
++				val |= 1u << 18;
++				OSIncrementAtomic(&gTc1EfFix);
++			}
++			const bool force = gTc1ForceBw || xeTc1ForceActive(gTc1PortObj);
++			if (gTc1 && force && (reg == base + 0x30 || reg == base + 0x40)) {
++				val = (val & ~0xffffffu) | ((val & 0xffffff) >> 1);
++				OSIncrementAtomic(&gTc1ForceN);
++			}
++			if (gTc1Dbg) xeTc1TransNote(reg, in, val);
++			return val;
++		}
++	}
++	if (gTc1 && reg == 0x64000 + 0x100 * gTc1Ddi && (val & 0x80000000)) {
++		uint32_t code = 0xff;
++		switch (gTc1LinkBw) { case 0x06: code = 0; break; case 0x0a: code = 1; break; case 0x14: code = 2; break; case 0x1e: code = 3; break; }
++		if (code != 0xff) {
++			val = (val & ~(0x7u << 20)) | (code << 20);
++			OSIncrementAtomic(&gTc1RateFix);
++			gTc1RateLast = val;
++		}
++	}
++	if (gTc1 && reg >= 0x46140 && reg <= 0x4614c && (val >> 28) == gTc1Ddi + 1) {
++		val = (val & 0x0fffffff) | ((gTc1Ddi + 3) << 28);
++		OSIncrementAtomic(&gTc1ClkFix);
++	}
++	return val;
++}
++static void xeTc1FixHdcp(void *path);
++static void xeTc1TrainPattern(void *path, uint32_t pattern) {
++	auto *pb = reinterpret_cast<uint8_t *>(path);
++	void *port = path ? *reinterpret_cast<void **>(pb + 0x3648) : nullptr;
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (pc && pc[0] == gTc1Ddi) xeTc1FixHdcp(path);
++	if (gTc1 && pattern == 1 && pc && pc[0] == gTc1Ddi) {
++		const uint32_t pipe = *reinterpret_cast<uint32_t *>(pb + 0x3640);
++		const uint32_t lanes = *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x124);
++		gTc1Pipe = pipe; gTc1PortObj = port; gTc1PipeForRel = pipe;
++		if (pipe < 3 && (lanes == 1 || lanes == 2 || lanes == 4)) {
++			const uint32_t clk = 0x46140 + 4 * pipe, fn = 0x60400 + 0x1000 * pipe;
++			const uint32_t c0 = xeTc1Rd(clk), f0 = xeTc1Rd(fn);
++			const uint32_t cw = (c0 & 0x0fffffff) | ((gTc1Ddi + 3) << 28);
++			const uint32_t fw = (f0 & ~0x7F00000Eu) | ((gTc1Ddi + 1) << 27) | 0x02000000u | (((lanes - 1) << 1) & 0xE);
++			if (!(f0 & 0x80000000)) {
++				NGreen::callback->writeReg32(clk, cw);
++				NGreen::callback->writeReg32(fn, fw);
++			}
++			const UInt32 n = OSIncrementAtomic(&gTc1Routes);
++			snprintf(gTc1RouteDiag, sizeof(gTc1RouteDiag), "#%u pipe=%u lanes=%u CLK_SEL %x->%x FUNC_CTL %x->%x DP_TP_CTL=%x DDI_BUF=%x clkfix=%u",
++					 (unsigned)(n + 1), pipe, lanes, c0, xeTc1Rd(clk), f0, xeTc1Rd(fn), xeTc1Rd(0x60540 + 0x1000 * pipe),
++					 xeTc1Rd(0x64000 + 0x100 * gTc1Ddi), (unsigned)gTc1ClkFix);
++			if (gTc1Dbg && n < 12) IOLog("XeNG TC1 route %s\n", gTc1RouteDiag);
++		}
++	}
++	FunctionCast(xeTc1TrainPattern, gTc1OrgTrainPat)(path, pattern);
++}
++// ---- USB-C stage 3g (ngreentc1=9): DPCD trace of link training (diagnostic only) ----------------------------------
++// 3f: enablePort now succeeds (30/30), the transcoder route is in place, but linkTraining still returns 0xe00002bc.
++// Record every DPCD read/write on the TC1 port during the first trainings (readAUX is already NootedGreen's
++// wrapICLReadAUX, which calls xeTc1AuxNote; writeAUX is routed here) and publish it as ngreen-tc1-dpcd1/2/3.
++static mach_vm_address_t gTc1OrgWriteAUX = 0;
++static char gTc1Dpcd[3][480] = {};
++static volatile UInt32 gTc1DpcdN = 0;
++static IOSimpleLock *gTc1DpcdLock = nullptr;
++volatile uint32_t gTc1LinkBw = 0;   // last DPCD 0x100 LINK_BW_SET written to the TC1 sink (stage 3m)
++volatile uint32_t gTc1LaneSet = 0;  // last DPCD 0x101 LANE_COUNT_SET (bit 7 = enhanced framing) (stage 3r)
++void xeTc1AuxNote(void *port, bool write, uint32_t addr, const void *buf, uint32_t len, uint32_t ret) {
++	if (!gTc1 || !port || !gTc1DpcdLock) return;
++	auto *pc = *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548);
++	if (write && addr == 0x100 && buf && len >= 1 && !ret && pc && pc[0] == gTc1Ddi) gTc1LinkBw = *reinterpret_cast<const uint8_t *>(buf);
++	if (write && buf && !ret && pc && pc[0] == gTc1Ddi) {
++		if (addr == 0x100 && len >= 2) gTc1LaneSet = reinterpret_cast<const uint8_t *>(buf)[1];
++		else if (addr == 0x101 && len >= 1) gTc1LaneSet = *reinterpret_cast<const uint8_t *>(buf);
++	}
++	if (!gTc1Dbg || !pc || pc[0] != gTc1Ddi || (!gTc1Trains && !gTc1Allocs)) return;   // trace: debug only, once training started
++	const UInt32 n = OSIncrementAtomic(&gTc1DpcdN);
++	char e[40]; size_t o = snprintf(e, sizeof(e), "%c%x:", write ? 'W' : 'R', addr);
++	auto *b = reinterpret_cast<const uint8_t *>(buf);
++	for (uint32_t i = 0; b && !ret && i < len && i < 6 && o + 3 < sizeof(e); i++) o += snprintf(e + o, sizeof(e) - o, "%02x", b[i]);
++	if (ret) o += snprintf(e + o, sizeof(e) - o, "!%x", ret & 0xfff);
++	snprintf(e + o, sizeof(e) - o, " ");
++	IOSimpleLockLock(gTc1DpcdLock);
++	for (auto &line : gTc1Dpcd) {
++		const size_t used = strlen(line);
++		if (used + strlen(e) + 1 < sizeof(line)) { strlcat(line, e, sizeof(line)); break; }
++	}
++	IOSimpleLockUnlock(gTc1DpcdLock);
++	(void)n;
++}
++static uint32_t xeTc1WriteAUX(void *port, uint32_t addr, void *buf, uint32_t len) {
++	uint8_t copy[16];
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (addr == 0x100 && buf && len >= 1 && len <= sizeof(copy) && pc && pc[0] == gTc1Ddi && xeTc1ForceActive(port) &&
++		*reinterpret_cast<uint8_t *>(buf) == 0x0a) {
++		memcpy(copy, buf, len);
++		copy[0] = 0x14;
++		buf = copy;
++		OSIncrementAtomic(&gTc1ForceBw);
++	}
++	const uint32_t r = FunctionCast(xeTc1WriteAUX, gTc1OrgWriteAUX)(port, addr, buf, len);
++	xeTc1AuxNote(port, true, addr, buf, len, r);
++	return r;
++}
++// ---- USB-C stage 3i (ngreentc1=11): ADL-P modular-FIA lane functions --------------------------------------------
++// 3h: both DKL lane groups programmed, trace unchanged (sink lane 0 never locks). Apple's
++// getDklPhyLaneConfigBitMask logs "DisplayPortX4TxLaneAssignmentForTypeCConnector4/5 not defined" on this port: its TGL
++// table has no entry for our pin assignment, so the physical lane mask (and from it lane count / TX selection) is
++// wrong. ADL-P FIA is modular (DFLEXDPSP bit 4), two TC ports per FIA, index = tc & 1, 8-bit fields. As in i915
++// (intel_tc_port_get_lane_mask / intel_tc_port_set_fia_lane_count) and WhateverXe (wrapTGLLaneMask /
++// wrapTGLConfiguredLanes / wrapTGLFIALaneCount):
++//   getDklPhyLaneConfigBitMask   -> (DFLEXDPSP >> 8*idx) & 0xf            (physical lanes assigned to DP)
++//   getConfiguredDklPhyLaneConfig -> (DFLEXDPMLE1 >> 4*idx) & 0xf          (logical main-link lanes enabled)
++//   setFIALaneCount(n)           -> DFLEXDPMLE1 field = ML0 / ML1_0 / ML3_0 (no lane reversal on this board)
++static mach_vm_address_t gTc1OrgLaneMask = 0, gTc1OrgCfgLanes = 0, gTc1OrgFiaCount = 0;
++static volatile uint32_t gTc1LastMask = 0xff, gTc1LastCfg = 0xff, gTc1LastFia = 0xff;
++static inline bool xeTc1IsPort(void *port) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	return gTc1 && pc && pc[0] == gTc1Ddi && *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x550) == 3;
++}
++static inline uint32_t xeTc1FiaBase() { return (gTc1Ddi - 3) < 2 ? 0x163000 : 0x16e000; }
++static uint32_t xeTc1LaneMask(void *port) {
++	if (!xeTc1IsPort(port)) return FunctionCast(xeTc1LaneMask, gTc1OrgLaneMask)(port);
++	const uint32_t v = xeTc1Rd(xeTc1FiaBase() + 0x8a0);
++	gTc1LastMask = v == 0xffffffff ? 0 : (v >> (8 * ((gTc1Ddi - 3) & 1))) & 0xf;
++	return gTc1LastMask;
++}
++static uint32_t xeTc1CfgLanes(void *port) {
++	if (!xeTc1IsPort(port)) return FunctionCast(xeTc1CfgLanes, gTc1OrgCfgLanes)(port);
++	const uint32_t v = xeTc1Rd(xeTc1FiaBase() + 0x8c0);
++	gTc1LastCfg = v == 0xffffffff ? 0 : (v >> (4 * ((gTc1Ddi - 3) & 1))) & 0xf;
++	return gTc1LastCfg;
++}
++static void xeTc1FiaCount(void *port, uint32_t lanes) {
++	if (!xeTc1IsPort(port)) { FunctionCast(xeTc1FiaCount, gTc1OrgFiaCount)(port, lanes); return; }
++	if (lanes != 1 && lanes != 2 && lanes != 4) return;
++	const uint32_t reg = xeTc1FiaBase() + 0x8c0, sh = 4 * ((gTc1Ddi - 3) & 1);
++	const uint32_t v = xeTc1Rd(reg);
++	if (v == 0xffffffff) return;
++	NGreen::callback->writeReg32(reg, (v & ~(0xfu << sh)) | (((1u << lanes) - 1) << sh));
++	gTc1LastFia = (lanes << 8) | ((xeTc1Rd(reg) >> sh) & 0xf);
++}
++// HDCP2 on the TC1 path: AppleIntelHDCP2::init (path) sets +0x28 (fb) and +0x30 but nothing sets the register manager
++// at +0x38 for this path, and the HDCP2 timer (handleEnableHDCP -> dispatchEvent -> handleDisableHDCP) then reads
++// through NULL (3j panic, ~8 s after the link came up). Skip the HDCP2 timer while +0x38 is NULL; HDCP is not needed.
++static mach_vm_address_t gTc1OrgHdcpTimer = 0;
++static volatile UInt32 gTc1HdcpSkips = 0;
++static void xeTc1HdcpTimer(void *hdcp, void *src) {
++	if (gTc1 && hdcp && !getMember<void *>(hdcp, 0x38)) { OSIncrementAtomic(&gTc1HdcpSkips); return; }
++	FunctionCast(xeTc1HdcpTimer, gTc1OrgHdcpTimer)(hdcp, src);
++}
++// Stage 3l (ngreentc1=14): 3k panicked in WindowServer: full modeset -> disableDisplay -> AppleIntelDisplayPath::disableHDCP
++// -> AppleIntelHDCP2::handleDisableHDCP, vtable call through the NULL register manager at HDCP2+0x38. HDCP1::init sets
++// +0x38 = fb->0x1d0 (controller) ->0xc40 (register manager); for this path nothing does. Give the path's HDCP object
++// (path+0x32b8) that same manager as soon as the TC1 path exists.
++static volatile UInt32 gTc1HdcpFixed = 0;
++static void xeTc1FixHdcp(void *path) {
++	if (!gTc1 || !path) return;
++	auto *hdcp = getMember<uint8_t *>(path, 0x32b8);
++	auto *fb = getMember<uint8_t *>(path, 0x32b0);
++	auto *ctl = fb ? getMember<uint8_t *>(fb, 0x1d0) : nullptr;
++	auto *mgr = ctl ? getMember<void *>(ctl, 0xc40) : nullptr;
++	if (hdcp && mgr && !getMember<void *>(hdcp, 0x38)) {
++		getMember<void *>(hdcp, 0x38) = mgr;
++		OSIncrementAtomic(&gTc1HdcpFixed);
++	}
++}
++// Unplug with a lit link (3n): Apple's invokeHotplugHandler logged "ddi 3 isHPDLow = 0 ... Returning as DPCD failed", so
++// no disconnect reached AGDC, macOS kept "LG ULTRAWIDE" as connected, pipe B / TC PLL kept running and the fan spun up.
++// AppleIntelPort::isHPDLow reads TGL hotplug bits; on ADL-P the live Type-C connection is TCSS_DDI_STATUS (alt-mode bits
++// 1:0 == 1). Report HPD low for the TC1 port when TCSS no longer shows DP alt mode.
++static mach_vm_address_t gTc1OrgHpdLow = 0;
++static volatile UInt32 gTc1HpdLowForced = 0;
++static bool xeTc1IsHpdLow(void *port) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (gTc1 && pc && pc[0] == gTc1Ddi && NGreen::callback) {
++		const uint32_t st = xeTc1Rd(0x161500 + 4 * (gTc1Ddi - 3));
++		if (st == 0xffffffff || (st & 3) != 1) { OSIncrementAtomic(&gTc1HpdLowForced); return true; }
++	}
++	return FunctionCast(xeTc1IsHpdLow, gTc1OrgHpdLow)(port);
++}
++
++
++// Stage 3w (ngreentc1=25): 3v - still no 2560x1080; IOGraphics never even offers it to validateDetailedTiming: FB2's
++// IOFBTimingRange max pixel clock is 180 MHz. AppleIntelPort::getDPCDInfo sets the downstream (DP->HDMI converter) port's
++// MaxTMDSClock (port+0x38+4) from DPCD and then, with controller quirk 0xf8 bit 6, caps it by the source lane count
++// assuming HBR: 4 lanes 360 MHz, 2 lanes 180 MHz, else 90 MHz. 2 lanes at HBR2 (what this link runs) carry 360 MHz.
++static volatile UInt32 gTc1TmdsFix = 0;
++static volatile uint32_t gTc1TmdsWas = 0;
++void xeTc1FixTmds(void *port) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (!gTc1 || !pc || pc[0] != gTc1Ddi) return;
++	auto &tmds = *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x3c);
++	gTc1TmdsWas = tmds;
++	if (tmds == 180000000u) { tmds = 300000000u; OSIncrementAtomic(&gTc1TmdsFix); }
++}
++// Stage 3x (ngreentc1=26): selecting 2560x1080 -> "enablePort: Failed to enable port", "Phase 1 of link training failed";
++// live: TRANS_DDI_FUNC_CTL 0x2000006 and DDI_BUF_CTL 0x201cc6 = x4. The USB-C port has 2 DP lanes (pin assignment D,
++// DFLEXDPSP mask 0x3); NootedGreen's eDP lane fixes (computeLaneCount / setupOptimalLaneCount raise to DDI_BUF_CTL_A's
++// width) and Apple's HBR estimate can ask for 4. Clamp the TC1 port to the lanes its FIA assigns.
++static volatile UInt32 gTc1LaneClamp = 0;
++static volatile uint32_t gTc1LaneRateSeen = 0;
++unsigned int xeTc1ClampLanes(void *port, unsigned int lanes, unsigned int rate) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (!gTc1 || !pc || pc[0] != gTc1Ddi) return lanes;
++	if (rate) gTc1LaneRateSeen = rate;
++	const uint32_t tc = gTc1Ddi - 3, v = NGreen::callback ? NGreen::callback->readReg32((tc < 2 ? 0x163000 : 0x16e000) + 0x8a0) : 0xffffffff;
++	uint32_t mask = v == 0xffffffff ? 0x3 : (v >> (8 * (tc & 1))) & 0xf, max = 0;
++	for (; mask; mask >>= 1) max += mask & 1;
++	if (max != 1 && max != 2 && max != 4) max = 2;
++	if (lanes > max) { OSIncrementAtomic(&gTc1LaneClamp); return max; }
++	return lanes;
++}
++static volatile UInt32 gTc1LaneRateFix = 0;
++unsigned int xeTc1LaneRate(void *port, unsigned int rate) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	if (gTc1 && pc && pc[0] == gTc1Ddi && gTc1Hbr2Mask == 0xff) {
++		if (rate == 0x0a) { OSIncrementAtomic(&gTc1LaneRateFix); return 0x14; }
++		if (gTc1 && rate == 270000) { OSIncrementAtomic(&gTc1LaneRateFix); return 540000; }
++	}
++	return rate;
++}
++static uint32_t xeTc1LinkTraining(void *port, void *cfg) {
++	auto *pc = port ? *reinterpret_cast<uint32_t **>(reinterpret_cast<uint8_t *>(port) + 0x548) : nullptr;
++	const bool mine = gTc1 && pc && pc[0] == gTc1Ddi && gTc1PathByPort && gTc1AllocBoot && gTc1GController;
++	void *path0 = nullptr, *path1 = nullptr;
++	if (mine) {
++		path0 = path1 = reinterpret_cast<void *(*)(void *)>(gTc1PathByPort)(port);
++		auto *ctl = *reinterpret_cast<uint8_t **>(gTc1GController);
++		if (!path0 && ctl && gTc1Fb < *reinterpret_cast<uint32_t *>(ctl + 0xd5c) && gTc1Allocs < 4) {
++			auto *fb = *reinterpret_cast<uint8_t **>(ctl + 0xd60 + 8 * gTc1Fb);
++			if (fb) {
++				const uint32_t pidx = *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(port) + 0x120);
++				const uint8_t had = fb[0x1e7];
++				const bool ok = reinterpret_cast<bool (*)(void *, uint32_t)>(gTc1AllocBoot)(fb, pidx);
++				path1 = reinterpret_cast<void *(*)(void *)>(gTc1PathByPort)(port);
++				const UInt32 a = OSIncrementAtomic(&gTc1Allocs);
++				snprintf(gTc1PathDiag, sizeof(gTc1PathDiag), "alloc#%u fb=%u(idx %u) port120=%u had1e7=%u -> ok=%d path=%d pipe=%u 3fd8=%d",
++						 (unsigned)(a + 1), gTc1Fb, *reinterpret_cast<uint32_t *>(fb + 0x1dc), pidx, had, (int)ok, path1 != nullptr,
++						 path1 ? *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(path1) + 0x3640) : 0xffu,
++						 *reinterpret_cast<int32_t *>(fb + 0x3fd8));
++				IOLog("XeNG TC1 path %s\n", gTc1PathDiag);
++			}
++		}
++	}
++	if (mine && path1) xeTc1FixHdcp(path1);
++	const uint32_t r = FunctionCast(xeTc1LinkTraining, gTc1OrgLinkTrain)(port, cfg);
++	if (mine) {
++		const UInt32 n = OSIncrementAtomic(&gTc1Trains);
++		gTc1LastTrain = r;
++		if (gTc1Dbg && n < 12) IOLog("XeNG TC1 linkTraining #%u path=%d -> 0x%x DDI_BUF=%x PW_DDI2=%x TCPLL=%x\n", (unsigned)(n + 1), path1 != nullptr, r,
++						  xeTc1Rd(0x64000 + 0x100 * gTc1Ddi), xeTc1Rd(0x45454), xeTc1Rd(0x46038 + 8 * (gTc1Ddi - 3)));
++	}
++	return r;
++}
++static void xeTc1PublishPath(IOService *svc) {
++	if (!gTc1 || !svc) return;
++	char b[140];
++	snprintf(b, sizeof(b), "trainings=%u last=0x%x allocs=%u hdcpskips=%u hdcpfixed=%u nullmgr=%u", (unsigned)gTc1Trains, gTc1LastTrain,
++			 (unsigned)gTc1Allocs, (unsigned)gTc1HdcpSkips, (unsigned)gTc1HdcpFixed, (unsigned)gTc1NullMgr);
++	svc->setProperty("ngreen-tc1-train", b);
++	if (gTc1PathDiag[0]) svc->setProperty("ngreen-tc1-path", gTc1PathDiag);
++	if (gTc1EnDiag[0]) svc->setProperty("ngreen-tc1-enable", gTc1EnDiag);
++	if (gTc1RouteDiag[0]) svc->setProperty("ngreen-tc1-route", gTc1RouteDiag);
++	if (gTc1RnuDiag[0]) svc->setProperty("ngreen-tc1-rnu", gTc1RnuDiag);
++	if (gTc1TransTrail[0]) svc->setProperty("ngreen-tc1-trans", gTc1TransTrail);
++	if (gTc1) svc->setProperty("ngreen-tc1-hpdlow-forced", (unsigned long long)gTc1HpdLowForced, 32);
++	if (gTc1) svc->setProperty("ngreen-tc1-enhanced-framing-fixes", (unsigned long long)gTc1EfFix, 32);
++	if (gTc1) svc->setProperty("ngreen-tc1-release-deferred", (unsigned long long)gTc1RelDeferred, 32);
++	{
++		char m[120];
++		snprintf(m, sizeof(m), "lanerate=%u seen=%u clamp=%u tmds=%u/%u", (unsigned)gTc1LaneRateFix, gTc1LaneRateSeen,
++				 (unsigned)gTc1LaneClamp, (unsigned)gTc1TmdsFix, gTc1TmdsWas);
++		svc->setProperty("ngreen-tc1-limits", m);
++	}
++	if (gTc1) {
++		char r[160];
++		snprintf(r, sizeof(r), "linkbw=%x ratefix=%u lastDDIBUF=%x hbr2pll=%x force pll/bw/n=%u/%u/%u pipe=%u", gTc1LinkBw, (unsigned)gTc1RateFix,
++				 gTc1RateLast, gTc1Hbr2Mask, gTc1ForcePll, gTc1ForceBw, gTc1ForceN, gTc1Pipe);
++		svc->setProperty("ngreen-tc1-rate", r);
++	}
++	if (gTc1) {
++		char f[96];
++		snprintf(f, sizeof(f), "lanemask=%x cfglanes=%x fia(set<<8|now)=%x DFLEXDPSP=%x DFLEXDPMLE1=%x", gTc1LastMask, gTc1LastCfg, gTc1LastFia,
++				 xeTc1Rd(xeTc1FiaBase() + 0x8a0), xeTc1Rd(xeTc1FiaBase() + 0x8c0));
++		svc->setProperty("ngreen-tc1-fia", f);
++	}
++	if (gTc1Dpcd[0][0]) svc->setProperty("ngreen-tc1-dpcd1", gTc1Dpcd[0]);
++	if (gTc1Dpcd[1][0]) svc->setProperty("ngreen-tc1-dpcd2", gTc1Dpcd[1]);
++	if (gTc1Dpcd[2][0]) svc->setProperty("ngreen-tc1-dpcd3", gTc1Dpcd[2]);
++}
++static void xeTc1InstallStage2(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
++	if (!gTc1 || !NGreen::callback || NGreen::callback->getIsRealTGL()) return;
++	KernelPatcher::RouteRequest r[] = {
++		{"__ZN17AppleIntelPortHAL11setPortModeEN14AppleIntelPort8PortModeE", xeTc1SetPortMode, gTc1OrgSetMode},
++		{"__ZN31AppleIntelRegisterAccessManager14ReadRegister32Em", xeTc1RegRead, gTc1OrgRegRead},
++	};
++	const bool ok = patcher.routeMultiple(index, r, address, size);
++	if (!ok) { patcher.clearError(); if (!gTc1OrgSetMode || !gTc1OrgRegRead) gTc1 = 0; }
++	IOLog("XeNG TC1 stage 2 routes: ok=%d setPortMode=%d regRead=%d (tc1=%u)\n", (int)ok, gTc1OrgSetMode != 0, gTc1OrgRegRead != 0, gTc1);
++	if (gTc1) {
++		gTc1DklLock = IOSimpleLockAlloc();
++		KernelPatcher::RouteRequest d[] = {
++			{"__ZN17AppleIntelPortHAL15ReadDekelPhyRegEj", xeTc1DklRead, gTc1OrgDklRead},
++			{"__ZN17AppleIntelPortHAL16WriteDekelPhyRegEjj", xeTc1DklWrite, gTc1OrgDklWrite},
++		};
++		const bool okd = gTc1DklLock && patcher.routeMultiple(index, d, address, size);
++		if (!okd) { patcher.clearError(); if (!gTc1OrgDklRead || !gTc1OrgDklWrite) gTc1 = 0; }
++		IOLog("XeNG TC1 stage 3 dekel routes: ok=%d read=%d write=%d (tc1=%u)\n", (int)okd, gTc1OrgDklRead != 0, gTc1OrgDklWrite != 0, gTc1);
++	}
++	if (gTc1) {
++		gTc1PathByPort = patcher.solveSymbol(index, "__ZN21AppleIntelDisplayPath18getFirstPathByPortEP14AppleIntelPort", address, size);
++		patcher.clearError();
++		gTc1AllocBoot = patcher.solveSymbol(index, "__ZN21AppleIntelFramebuffer28allocateBootDisplayResourcesEj", address, size);
++		patcher.clearError();
++		gTc1GController = patcher.solveSymbol(index, "_gController", address, size);
++		patcher.clearError();
++		KernelPatcher::RouteRequest t[] = {
++			{"__ZN14AppleIntelPort12linkTrainingEP18AGDCDPPortConfig_t", xeTc1LinkTraining, gTc1OrgLinkTrain},
++		};
++		const bool okt = gTc1PathByPort && gTc1AllocBoot && gTc1GController && patcher.routeMultiple(index, t, address, size);
++		if (!okt) { patcher.clearError(); if (!gTc1OrgLinkTrain) gTc1 = 0; }
++		if (gTc1) {
++			KernelPatcher::RouteRequest u[] = {
++				{"__ZN14AppleIntelPort8isHPDLowEv", xeTc1IsHpdLow, gTc1OrgHpdLow},
++			};
++			if (!patcher.routeMultiple(index, u, address, size)) { patcher.clearError(); if (!gTc1OrgHpdLow) gTc1 = 0; }
++		}
++		if (gTc1) {
++			KernelPatcher::RouteRequest h[] = {
++				{"__ZN15AppleIntelHDCP217timerEventHandlerEP18IOTimerEventSource", xeTc1HdcpTimer, gTc1OrgHdcpTimer},
++			};
++			if (!patcher.routeMultiple(index, h, address, size)) { patcher.clearError(); if (!gTc1OrgHdcpTimer) gTc1 = 0; }
++		}
++		if (gTc1) {
++			KernelPatcher::RouteRequest l[] = {
++				{"__ZN17AppleIntelPortHAL26getDklPhyLaneConfigBitMaskEv", xeTc1LaneMask, gTc1OrgLaneMask},
++				{"__ZN17AppleIntelPortHAL29getConfiguredDklPhyLaneConfigEv", xeTc1CfgLanes, gTc1OrgCfgLanes},
++				{"__ZN17AppleIntelPortHAL15setFIALaneCountEj", xeTc1FiaCount, gTc1OrgFiaCount},
++			};
++			if (!patcher.routeMultiple(index, l, address, size)) { patcher.clearError(); if (!gTc1OrgLaneMask || !gTc1OrgCfgLanes || !gTc1OrgFiaCount) gTc1 = 0; }
++		}
++		if (gTc1) {
++			gTc1DpcdLock = IOSimpleLockAlloc();
++			KernelPatcher::RouteRequest a[] = {
++				{"__ZN14AppleIntelPort8writeAUXEjPvj", xeTc1WriteAUX, gTc1OrgWriteAUX},
++			};
++			if (!gTc1DpcdLock || !patcher.routeMultiple(index, a, address, size)) { patcher.clearError(); if (!gTc1OrgWriteAUX) gTc1 = 0; }
++		}
++		if (gTc1) {
++			KernelPatcher::RouteRequest w[] = {
++				{"__ZN21AppleIntelDisplayPath22setLinkTrainingPatternE19LinkTrainingPattern", xeTc1TrainPattern, gTc1OrgTrainPat},
++			};
++			if (!patcher.routeMultiple(index, w, address, size)) { patcher.clearError(); if (!gTc1OrgTrainPat) gTc1 = 0; }
++		}
++		if (gTc1) {
++			KernelPatcher::RouteRequest e[] = {
++				{"__ZN17AppleIntelPortHAL10enablePortEv", xeTc1EnablePort, gTc1OrgEnablePort},
++			};
++			if (!patcher.routeMultiple(index, e, address, size)) { patcher.clearError(); if (!gTc1OrgEnablePort) gTc1 = 0; }
++		}
++		IOLog("XeNG TC1 stage 3c: linkTraining route ok=%d pathByPort=%d allocBoot=%d gController=%d (tc1=%u)\n", (int)okt,
++			  gTc1PathByPort != 0, gTc1AllocBoot != 0, gTc1GController != 0, gTc1);
++	}
++}
+ static uint32_t xePortModeStub(void *that) {
+ 	uint32_t n = ++gPortStubHits;
+ 	if (n <= 16) SYSLOG("ngreen", "portmode: slot virtual puro de probePortState interceptado (hit #%u); devolvendo %u", n, gPortModeVal);
++	// USB-C stage 1: probePortState reached the (pure) probePortMode for the TC1 port, i.e. its HPD is high.
++	if (gTc1 && that) {
++		auto *pc = *reinterpret_cast<uint8_t **>(reinterpret_cast<uint8_t *>(that) + 0x548); // PortConfig*
++		if (pc && *reinterpret_cast<uint32_t *>(pc + 0x0) == gTc1Ddi) {
++			const UInt32 h = OSIncrementAtomic(&gTc1StubHits);
++			if (gTc1Dbg && h < 8) IOLog("XeNG TC1 probePortMode ddi=%u kind=%u phy=%u -> mode %u (hit #%u)\n", gTc1Ddi,
++							 *reinterpret_cast<uint32_t *>(pc + 0x8), *reinterpret_cast<uint32_t *>(pc + 0xc), gTc1Mode, (unsigned)(h + 1));
++			xeTc1Dump("probe");
++			return gTc1Mode;
++		}
++	}
+ 	// Força a porta externa (DDI gHdmiDdi) a TMDS para que probePortState pule o caminho de DP/AUX.
+ 	if (that && !checkKernelArgument("-ngreennohdmikind")) {
+ 		auto *pc = *reinterpret_cast<uint8_t **>(reinterpret_cast<uint8_t *>(that) + 0x548); // PortConfig*
+@@ -1210,11 +2198,24 @@ static uint32_t xeRunAUXStub(void *that, uint32_t cmd, void *p, uint32_t n, uint
+ 		if (pc && *reinterpret_cast<uint32_t *>(pc + 0x0) == gHdmiDdi)
+ 			return gHdmiAuxKill == 2 ? 0u : 0x5d40023fu;
+ 	}
+-	return FunctionCast(xeRunAUXStub, gOrgRunAUX)(that, cmd, p, n, b);
++	const uint32_t r = FunctionCast(xeRunAUXStub, gOrgRunAUX)(that, cmd, p, n, b);
++	// USB-C stage 1: pure pass-through for TC1, but count and log what AUX returned.
++	if (gTc1 && that) {
++		auto *pc = *reinterpret_cast<uint8_t **>(reinterpret_cast<uint8_t *>(that) + 0x548);
++		if (pc && *reinterpret_cast<uint32_t *>(pc + 0x0) == gTc1Ddi) {
++			const UInt32 c = OSIncrementAtomic(&gTc1AuxCalls);
++			if (r) OSIncrementAtomic(&gTc1AuxFails);
++			gTc1LastAux = r;
++			if (gTc1Dbg && c < 24) IOLog("XeNG TC1 aux #%u cmd=0x%x n=%u b=%u -> 0x%x (AUX_CTL=0x%x PW_AUX2=0x%x)\n", (unsigned)(c + 1), cmd, n, b, r,
++							  NGreen::callback->readReg32(0x64310), NGreen::callback->readReg32(0x45444));
++		}
++	}
++	return r;
+ }
+ // Troca o slot 50 (byte 0x10 do header RTTI + 0x190) da vtable da classe pelo stub, na janela de carga do kext.
+ static void patchPortModeVtable(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+ 	PE_parse_boot_argn("ngreenportmode", &gPortModeVal, sizeof(gPortModeVal));
++	xeTc1ParseArgs();
+ 	if (gPortModeVal > 4) gPortModeVal = 0;
+ 	// Campos do HDMI externo, compartilhados com getOSInformation e o stub (parse aqui pois roda na carga do kext,
+ 	// antes de probePortState). -ngreennohdmi reverte ao comportamento antigo (DP), útil para comparar.
+@@ -1276,7 +2277,7 @@ static void patchPortModeVtable(KernelPatcher &patcher, size_t index, mach_vm_ad
+ 		}
+ 		uintptr_t before = *slot;
+ 		*slot = reinterpret_cast<uintptr_t>(xePortModeStub);
+-		if (gHdmiAuxKill) {
++		if (gHdmiAuxKill || gTc1) {
+ 			auto *slotAux = reinterpret_cast<uintptr_t *>(v + 0x10 + 0x188);
+ 			if (!gOrgRunAUX) gOrgRunAUX = *slotAux;
+ 			*slotAux = reinterpret_cast<uintptr_t>(xeRunAUXStub);
+@@ -1359,6 +2360,7 @@ static void xeFbLogBcast(uint32_t module, const uint8_t *hdr, const char *str, u
+ 	FunctionCast(xeFbLogBcast, gOrgFbLogBcast)(module, hdr, str, len);
+ }
+ 
++void xeTc1FixTmds(void *port);
+ static mach_vm_address_t gOrgGetDPCDInfo = 0;
+ static volatile UInt32 gDpcdHits = 0;
+ static uint32_t xeGetDPCDInfo(void *that) {
+@@ -1370,7 +2372,9 @@ static uint32_t xeGetDPCDInfo(void *that) {
+ 			if (h < 24) IOLog("XeAUX getDPCDInfo ddi=%u kind=%u (AUX de DP no caminho de online)\n", ddi, kind);
+ 		}
+ 	}
+-	return FunctionCast(xeGetDPCDInfo, gOrgGetDPCDInfo)(that);
++	const uint32_t r = FunctionCast(xeGetDPCDInfo, gOrgGetDPCDInfo)(that);
++	xeTc1FixTmds(that);
++	return r;
+ }
+ 
+ // Fase 3 (raiz): getDPSinkCount lê o SINK_COUNT do DPCD por AUX (conceito de DisplayPort). Num HDMI/TMDS nativo
+@@ -1824,11 +2828,33 @@ static void xeD13PostLightUp(uint32_t ret) {
+ // eDP (e qualquer path que não seja o do HDMI): 0, como o f10. HDMI com HPD alto: liga a energia antes de a Apple
+ // programar o pipe; enquanto o transcoder e a DDI não estiverem ligados, 1 (no máximo 6 vezes por plug); aceso, -1
+ // (mesmo modo -> parcial; modo novo -> completo). HPD baixo: 0.
++void xeTc1NoteRnu(uint32_t pipe, uint32_t tconf, uint32_t buf, bool lit, int d, uint32_t forces);
+ static int xeD13RnuDecision(void *ctrl, void *fb, void *path, const void *ret) {
+ 	if (!xeD13Active() || !gXeD13F10Undone || !gXeD13RnuRet || !fb || !path ||
+ 		reinterpret_cast<mach_vm_address_t>(ret) != gXeD13RnuRet)
+ 		return -1;
+-	if (!xeD13IsHdmiPort(getMember<void *>(path, 0x3648))) return 0;
++	if (!xeD13IsHdmiPort(getMember<void *>(path, 0x3648))) {
++		// USB-C stage 3k (ngreentc1=13): the TC1 path is not the HDMI port, so this returned 0 ("Partial modeset by
++		// updating plane") and pipe B was never enabled ("FB2 is not enabled") after training had succeeded. Same rule
++		// as HDMI: full modeset while transcoder + DDI are not lit (max 6 per plug), Apple's own decision once lit.
++		auto *port = getMember<void *>(path, 0x3648);
++		auto *pc = port ? getMember<uint32_t *>(port, 0x548) : nullptr;
++		if (gTc1 && pc && pc[0] == gTc1Ddi) {
++			const uint32_t st = xeD13Rd(0x161500 + 4 * (gTc1Ddi - 3));
++			const uint32_t pipe = getMember<uint32_t>(path, 0x3640);
++			if (st == 0xffffffff || (st & 3) != 1 || pipe < 1 || pipe > 2) return 0;
++			xeD13PowerOn(pipe, "tc1-rnu");
++			const uint32_t tconf = xeD13Rd(0x70008 + 0x1000 * pipe), buf = xeD13Rd(0x64000 + 0x100 * gTc1Ddi);
++			const bool lit = (tconf & 0xC0000000u) == 0xC0000000u && (buf & 0x80000000u) && !(buf & 0x80u);
++			static volatile UInt32 tcForces = 0;
++			const UInt32 f = tcForces;
++			const int d = lit ? -1 : f < 6 ? 1 : 0;
++			if (d == 1) OSIncrementAtomic(&tcForces);
++			xeTc1NoteRnu(pipe, tconf, buf, lit, d, f);
++			return d;
++		}
++		return 0;
++	}
+ 	if (!(xeD13Rd(0xc4000) & (1u << (16 + gHdmiDdi)))) return 0;   // HPD baixo: nada para acender
+ 	const uint32_t pipe = getMember<uint32_t>(path, 0x3640);
+ 	if (pipe < 1 || pipe > 2) return 0;
+@@ -2137,7 +3163,34 @@ static void xeHotplugHook(void *controller, uint32_t ddi, uint32_t portMode) {
+ 		}
+ 		gXeD13LastHpd = hpd;
+ 	}
++	const bool tc1 = gTc1 && ddi == gTc1Ddi;
++	if (tc1) {
++		const UInt32 h = OSIncrementAtomic(&gTc1Hotplugs);
++		gTc1LastMode = portMode;
++		if (gTc1Dbg && h < 16) IOLog("XeNG TC1 hotplug #%u ddi=%u mode=%u (1 combo, 2 TBT, 3 DP alt, 4 legacy)\n", (unsigned)(h + 1), ddi, portMode);
++		xeTc1Dump("hp-pre");
++	}
+ 	FunctionCast(xeHotplugHook, gOrgHotplug)(controller, ddi, portMode);
++	// Power the pipe B wells (PW_2 + PW_B + DBUF) as soon as the sink answers on AUX, before AGDC configures the
++	// framebuffer (same helper as XE-HDMI13). The TC1 framebuffer's path is always pipe B (allocateBootDisplayResources
++	// for fb 2); the full-modeset decision powers whatever pipe the path really has. PW_C is no longer requested here.
++	// (The SetFbStatusOnNextProbe push first tried at this spot never worked: "Path has not been assigned".)
++	if (tc1 && gTc1 && controller && !NGreen::callback->getIsRealTGL()) {
++		const uint32_t st = NGreen::callback->readReg32(0x161500 + 4 * (gTc1Ddi - 3));
++		if (st != 0xffffffff && (st & 3) == 1 && gTc1LastAux == 0 && gTc1AuxCalls) {
++			const bool pb = xeD13PowerOn(1, "tc1");
++			snprintf(gTc1FbDiag, sizeof(gTc1FbDiag), "pwB=%d PW_CTL2=%x", (int)pb, NGreen::callback->readReg32(0x45404));
++		}
++	}
++	if (tc1) {
++		// Unplugged (no alt-mode HPD any more): make sure nothing of the connection stays powered or owned.
++		if (gTc1) {
++			const uint32_t st = NGreen::callback->readReg32(0x161500 + 4 * (gTc1Ddi - 3));
++			if (st == 0xffffffff || (st & 3) != 1) xeTc1Release("hotplug, HPD gone");
++		}
++		xeTc1Dump("hp-post");
++		xeTc1Publish(controller);
++	}
+ 	if (ddi == gHdmiDdi && controller) {
+ 		// B1 (iter 3): extra inofensivo. O espelho do handler já pede PW_B no init (via overridePowerWellsState(true),
+ 		// confirmado estaticamente), então este gatilho NÃO é "o caminho garantido" — é redundante e serve para
+@@ -2351,7 +3404,7 @@ static uint32_t xeHwDoGMBusRequest(void *that, uint32_t bus, uint32_t speed, voi
+ }
+ 
+ static void installHdmiTrigger(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+-	if (!gHdmiTrigger && !gHdmiEdid && !gHdmiPath && !gHdmiProbe && !gHdmiSink && !gHdmiLanes && !gHdmiOnline && !gHdmiPw && !gHdmiDdc && !gHdmiModeset && !gHdmiLight) return;
++	if (!gHdmiTrigger && !gHdmiEdid && !gHdmiPath && !gHdmiProbe && !gHdmiSink && !gHdmiLanes && !gHdmiOnline && !gHdmiPw && !gHdmiDdc && !gHdmiModeset && !gHdmiLight && !gTc1) return;
+ 	gSetFbStatus = patcher.solveSymbol(index,
+ 		"__ZN24AppleIntelBaseController22SetFbStatusOnNextProbeEP14AGDCFBOnline_t", address, size);
+ 	patcher.clearError();
+@@ -2365,7 +3418,7 @@ static void installHdmiTrigger(KernelPatcher &patcher, size_t index, mach_vm_add
+ 	// ngreenhdmipw funcionar sozinho como os irmãos (S2), wantHook = o conjunto completo das 7 flags pré-pw MAIS
+ 	// gHdmiPw. Assim: qualquer das 7 originais instala o hook idêntico ao pre-impl; pw sozinho também instala;
+ 	// sem flag nenhuma o early-return já cortou. É um acréscimo puro sobre o pre-impl (nenhuma config perde o hook).
+-	bool wantHook = gHdmiTrigger || gHdmiEdid || gHdmiPath || gHdmiProbe || gHdmiSink || gHdmiLanes || gHdmiOnline || gHdmiPw || gHdmiLight;
++	bool wantHook = gHdmiTrigger || gHdmiEdid || gHdmiPath || gHdmiProbe || gHdmiSink || gHdmiLanes || gHdmiOnline || gHdmiPw || gHdmiLight || gTc1;
+ 	bool ok = false;
+ 	if (wantHook) {
+ 		RouteRequestPlus r[] = {
+@@ -2919,6 +3972,7 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t
+ 		installFbLogBridge(patcher, index, address, size);
+ 		// xe (25/10) Fase 2: dispara o online do HDMI no hotplug (ngreenhdmitrig=1). Desligado por padrão.
+ 		installHdmiTrigger(patcher, index, address, size);
++		xeTc1InstallStage2(patcher, index, address, size);
+ 		SYSLOG("ngreen", "TGL FB routes applied (fixbootmode: getCurrentDisplayMode org=0x%llx, arg=%d)",
+ 			   (unsigned long long)this->ogetCurrentDisplayMode, (int)checkKernelArgument("-ngreenfixbootmode"));
+ 		
+@@ -4938,9 +5992,15 @@ void Gen11::enableDisplayEngine(AppleIntel::AppleIntelBaseController *that)
+ 	FunctionCast(enableDisplayEngine, callback->oenableDisplayEngine)(that );
+ }
+ 
++unsigned int xeTc1LaneRate(void *port, unsigned int rate);
++unsigned int xeTc1ClampLanes(void *port, unsigned int lanes, unsigned int rate);
+ void Gen11::computeLaneCount(AppleIntel::AppleIntelBaseController *that, const IODetailedTimingInformationV2 *timing, unsigned int linkRate, unsigned int bpp, unsigned int *laneCount) {
+ 	if (!laneCount) return;
+ 
++	// USB-C stage 3v (ngreentc1=24): validateDetailedTiming rejects 2560x1080@60 on the TC1 framebuffer ("Bandwidth
++	// validation failed") because computeLaneCount is asked about HBR (port+0x128 = 0x0a, AGDC's choice) and 185.58 MHz
++	// x 24 bpp needs more than HBR x2. The light-up runs at HBR2 anyway (stage 3n), so answer for HBR2 on that port.
++	linkRate = xeTc1LaneRate(that, linkRate);
+ 	// Call original first — handles all standard DP rates on both real TGL and spoofed paths.
+ 	FunctionCast(computeLaneCount, callback->ocomputeLaneCount)(that, timing, linkRate, bpp, laneCount);
+ 
+@@ -4968,6 +6028,7 @@ void Gen11::computeLaneCount(AppleIntel::AppleIntelBaseController *that, const I
+ 
+ 	if (hwLanes > *laneCount)
+ 		*laneCount = hwLanes;
++	*laneCount = xeTc1ClampLanes(that, *laneCount, linkRate);
+ }
+ 
+ // setupOptimalLaneCount is called by hwSetMode to pick the lane count that gets
+@@ -5005,6 +6066,7 @@ void Gen11::setupOptimalLaneCount(AppleIntel::AppleIntelBaseController *that, co
+ 
+ 	if (hwLanes > cached)
+ 		cached = hwLanes;
++	cached = xeTc1ClampLanes(that, cached, 0);
+ }
+ 
+ using XeAuxFn = uint32_t (*)(void *, uint32_t, void *, uint32_t);
+@@ -5045,9 +6107,11 @@ static void xeAuxBlApply(thread_call_param_t, thread_call_param_t) {
+ 	xeTopoPublish(nullptr, nullptr);
+ }
+ 
++void xeTc1AuxNote(void *port, bool write, uint32_t addr, const void *buf, uint32_t len, uint32_t ret);
+ IOReturn Gen11::wrapICLReadAUX(void *that, uint32_t address, void *buffer, uint32_t length) {
+ 
+ 	IOReturn retVal = FunctionCast(wrapICLReadAUX, callback->orgICLReadAUX)(that, address, buffer, length);
++	xeTc1AuxNote(that, false, address, buffer, length, retVal);
+ 	if (retVal == kIOReturnSuccess && address == 0 && buffer && length >= 16 && gXeDpcd700Ret == 0xFFFFFFFFU) {
+ 		// xe/auxbl: eDP backlight caps, read once next to Apple's first sink-caps read (read only)
+ 		uint32_t caps[4] = {0, 0, 0, 0}, hdr = 0;
+@@ -5794,9 +6858,12 @@ void Gen11::raWriteRegister32b(void *that,void *param_1,unsigned long param_2, U
+ 	raWriteRegister32(that, reinterpret_cast<uint64_t>(param_1) + param_2,param_3);
+ };
+ 
++uint32_t xeTc1FixWrite(unsigned long reg, uint32_t val);
+ void Gen11::raWriteRegister32(void *that,unsigned long param_1, UInt32 param_2)
+ {
++	if (!that) return;   // USB-C stage 3k: HDCP2 on the TC1 port writes through a NULL register manager
+ 	if (xeInertDrop(param_1)) return;
++	param_2 = xeTc1FixWrite(param_1, param_2);
+ 	param_2 = xeFixFilterWrite(param_1, param_2);
+ 	if ((param_1 & 0xFFFFF) == 0x7019C) xeFixEnsure();
+ 	// V93: optional plane SURF zero-write guard.
+@@ -6305,6 +7372,12 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
+ 
+ 		// Connectors 2-3: Dummy
+ 		pinfo[1].connectors[2] = { 2, 2, 2, 0, ConnectorDummy, 0 };
++		// USB-C stage 1 (ngreentc1=1): slot 2 = Apple's own TC1 entry (DDI 3, GMBUS 9, DP, Type-C PHY).
++		xeTc1ParseArgs();
++		if (gTc1) {
++			pinfo[1].connectors[2] = { gTc1Ddi, gTc1Bus, 1, 1, ConnectorDP, gTc1Flags };
++			SYSLOG("ngreen", "getOSInformation: con2 = TC1 DP (DDI %u gmbus %u phy 1 flags 0x%x)", gTc1Ddi, gTc1Bus, gTc1Flags);
++		}
+ 		pinfo[1].connectors[3] = { 3, 3, 3, 0, ConnectorDummy, 0 };
+ 
+ 		SYSLOG("ngreen", "getOSInformation: patched pinfo[1] for ADL-P (LVDS+HDMI, mobile)");
+@@ -6354,6 +7427,19 @@ uint64_t Gen11::getOSInformation(AppleIntel::AppleIntelBaseController *that)
+ 					svc->setProperty("ngreen-hdmilight", gHdmiLightDiag);
+ 			}
+ 			SYSLOG("ngreen", "getOSInformation: entrada ativa %s", buf);
++			if (gTc1) {
++				auto *c2 = active + 0x20 + 0x30;          // connectors[2]
++				char t[112];
++				snprintf(t, sizeof(t), "ddi=%u gmbus=%u kind=%u phy=%u type=0x%x flags=0x%x ports=%u fbs=%u",
++						 *reinterpret_cast<uint32_t *>(c2 + 0x0), *reinterpret_cast<uint32_t *>(c2 + 0x4),
++						 *reinterpret_cast<uint32_t *>(c2 + 0x8), *reinterpret_cast<uint32_t *>(c2 + 0xc),
++						 *reinterpret_cast<uint32_t *>(c2 + 0x10), *reinterpret_cast<uint32_t *>(c2 + 0x14),
++						 active[0x12], active[0x13]);
++				if (auto *svc = OSDynamicCast(IOService, reinterpret_cast<OSObject *>(that)))
++					svc->setProperty("ngreen-tc1-con2", t);
++				IOLog("XeNG TC1 con2 active: %s\n", t);
++				xeTc1Publish(that);
++			}
+ 		}
+ 	}
+ 	return ret;

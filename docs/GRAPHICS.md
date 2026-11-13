@@ -40,6 +40,9 @@ SIP partly off (`csr-active-config` `130A0000`) and the boot-args below.
 | `ngreen-eu=64 ngreen-l3=6` | **this CPU's iGPU**: 64 EU and 6 L3 banks (measured on Linux, see below). The default is 96/8 |
 | `ngreenblmax=17741` | full backlight range. The panel's PWM period is 96000; Apple's driver writes 17741 at 100 %. Without it, maximum brightness is ~18 % |
 | `-ngreenpm` | XE-PM: hybrid-CPU turbo fix (P-cores were capped ~3.8 GHz), EPP 0, deep C-states. Keeps the BIOS power limit. Don't use `ngreenpm=22`; that's the XPS's limit |
+| `ngreenhdmilight=2 ngreenhdmiflags=0x202 ngreenhdmiddc=1 ngreenhdmiaux=1 ngreenhdmiedid=1 ngreenhdmisink=1 ngreenhdmiregs=1` | the HDMI port (VostroXe's XE-HDMI13), see [DISPLAYS.md](DISPLAYS.md) |
+| `-ngreentc1` | USB-C DisplayPort alt mode (needs the HDMI set), see [DISPLAYS.md](DISPLAYS.md) |
+| `msgbuf=8388608` | larger kernel log buffer, for diagnosing GPU hangs |
 | `itlwm_he=1` | Wi-Fi 6 rates (AirportItlwm) |
 | `alcverbs=1`, `keepsyms=1`, `debug=0x100` | audio verb tool, readable panics, no reboot on panic |
 

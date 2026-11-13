@@ -6,11 +6,11 @@ AirDrop works in both directions (iPhone ↔ Mac) with [ForbiddenItlwm](https://
 
 | | |
 |---|---|
-| Wi-Fi driver | ForbiddenItlwm **0.3.1-test1** (official prerelease build, [release](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.3.1-test1)) |
-| Bluetooth LE | BTLEAdvFixup 0.8.1. **IntelBTPatcher is disabled**, because both hook the same function and loading both panics. |
+| Wi-Fi driver | ForbiddenItlwm **0.5.3-test1** (official release build, [release](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.5.3-test1); includes 0.4.0's security fixes) |
+| Bluetooth LE | BTLEAdvFixup 0.9.0. **IntelBTPatcher is disabled**, because both hook the same function and loading both panics. |
 | Boot flags | `-btleadv` and the `-itlawdl*` / `itlawdlintcoal=4` / `itlawdltxqueue=4096` set from ForbiddenItlwm's [BOOT-FLAGS.md](https://github.com/retropineaple/ForbiddenItlwm/blob/main/docs/BOOT-FLAGS.md) |
 
-On this laptop (AX211 `8086:51F1`), every AirDrop frame from the iPhone arrived with 8 bytes of zero padding, and the driver rejected all of them, so transfers stayed on "Waiting". The fix was found here ([ForbiddenItlwm#6](https://github.com/retropineaple/ForbiddenItlwm/issues/6)) and is part of 0.3.1-test1.
+On this laptop (AX211 `8086:51F1`), every AirDrop frame from the iPhone arrived with 8 bytes of zero padding, and the driver rejected all of them, so transfers stayed on "Waiting". The fix was found here ([ForbiddenItlwm#6](https://github.com/retropineaple/ForbiddenItlwm/issues/6)) and is part of every release since 0.3.1-test1.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ On this laptop (AX211 `8086:51F1`), every AirDrop frame from the iPhone arrived 
 ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Added|Channel|CountryLearned|ZeroPadTrimmed|Forwarded)"'
 ```
 
-Expected: `forbidden-0.3.1-test1`, `verified`, `Added = Yes`, `Channel = 149`, `CountryLearned = Yes`. `ZeroPadTrimmed` and `Forwarded` rise together while an iPhone is nearby.
+Expected: `forbidden-0.5.3-test1`, `verified`, `Added = Yes`, `Channel = 149`, `CountryLearned = Yes`. `ZeroPadTrimmed` and `Forwarded` rise together while an iPhone is nearby.
 
 ## Notes
 
