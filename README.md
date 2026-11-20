@@ -42,10 +42,12 @@ See [docs/HARDWARE.md](docs/HARDWARE.md) for details.
 | ThinkPad hotkeys (F4 mic mute, F7–F12), fan and sensors | YogaSMC 1.5.3 (+ the YogaSMCNC menu-bar app) |
 | Idle power: CPU package ~2.5–3.2 W (was ~6 W) | EPP 96, NVMe L1 substates, BTIdle, timer coalescing; see [docs/POST-INSTALL.md](docs/POST-INSTALL.md#idle-power) |
 | USB, NVMe, battery, keyboard backlight (Fn+Space) | |
+| AirPlay screen mirroring from an iPhone | with the workaround in [tools/iphone-mirroring](tools/iphone-mirroring) (without it WindowServer crashes) |
 
 | Doesn't work | |
 |---|---|
-| **System sleep** | the firmware is Modern Standby only; sleep is disabled and display sleep is used instead |
+| **System sleep** (main EFI) | the firmware is Modern Standby only; sleep is disabled and display sleep is used instead. **Experimental Deep Idle sleep** (lid, power button and keyboard wake; ~7 W asleep vs Linux's 0.78 W) is in [experimental/sleep](experimental/sleep): help wanted |
+| Video sent over AirPlay from an app, iPhone Mirroring app | AirPlayed app video turns tiled after a few seconds; iPhone Mirroring untested with the workaround |
 | Sidecar, Universal Control | untested |
 | Internal microphones | DMICs behind the Intel DSP; the headset mic works |
 | WPA3-only Wi-Fi networks | AirportItlwm/ForbiddenItlwm limitation |
@@ -78,9 +80,10 @@ More in [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 | `src/applealc/` | builds AppleALC 1.9.8 with an **SN6140** entry (not in upstream AppleALC) |
 | `src/voodoogpio/` | builds VoodooGPIO with the Tiger Lake-LP `start` fix this machine's GPIO needs |
 | `src/intelbluetooth/` | builds IntelBluetoothFirmware/IntelBTPatcher 2.5.2 (lshbluesky fork, newer AX211 firmware) with the idle-suspend power-state patch |
-| `src/nootedgreen/` | builds this EFI's NootedGreen: JulioNectar `24450b4` + VostroXe's HDMI (XE-HDMI13) + USB-C DisplayPort alt mode |
+| `src/nootedgreen/` | builds this EFI's NootedGreen: JulioNectar `24450b4` + VostroXe's HDMI (XE-HDMI13) + USB-C DisplayPort alt mode (+ the experimental sleep patch with `SLEEP=1`) |
+| `experimental/sleep/` | **experimental** system sleep (Deep Idle): kexts, SSDTs, two test configs, measurement tools, findings |
 | `refind/` | Apple-logo icon and its generator, for the optional rEFInd menu |
-| `tools/` | `fetch-simplehda.sh`; `timer-coalesce/` (optional LaunchDaemon, lower idle power) |
+| `tools/` | `fetch-simplehda.sh`; `timer-coalesce/` (optional LaunchDaemon, lower idle power); `iphone-mirroring/` (AirPlay / iPhone Mirroring workarounds) |
 
 All build scripts use only the Xcode **Command Line Tools** (no full Xcode).
 
@@ -90,7 +93,8 @@ Built on the work of acidanthera (OpenCore, Lilu, AppleALC, WhateverGreen, Virtu
 StezzaPilot/sgiammori (NootedGreen), JulioNectar (the Tahoe Iris Xe stack this build follows),
 henriquejsza (VostroXe: the HDMI port), b00t0x (WhateverXe, a reference for the USB-C work),
 OpenIntelWireless and laobamac (itlwm/AirportItlwm), retropineaple (ForbiddenItlwm, BTLEAdvFixup),
-zhen-zen (YogaSMC), lshbluesky (IntelBluetoothFirmware fork),
+zhen-zen (YogaSMC), lshbluesky (IntelBluetoothFirmware fork), labrouss (S0ixStandby, the base of the
+experimental sleep), gianguyen14 (the AirPlay decoder idea),
 VoodooI2C/VoodooPS2, USBToolBox and laobamac (SimpleHDA). Third-party components keep their own
 licenses: see [THIRD-PARTY.md](THIRD-PARTY.md). This repo's own scripts and docs are MIT
 ([LICENSE](LICENSE)).

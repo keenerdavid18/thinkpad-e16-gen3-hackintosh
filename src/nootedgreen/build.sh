@@ -1,10 +1,12 @@
 #!/bin/zsh
 # build.sh: builds the NootedGreen.kext shipped in EFI/OC/Kexts (Iris Xe acceleration + the laptop's HDMI port +
 # USB-C DisplayPort alt mode) from source, with only the Xcode Command Line Tools.
-#   zsh src/nootedgreen/build.sh        -> src/nootedgreen/build/NootedGreen.kext
+#   zsh src/nootedgreen/build.sh          -> src/nootedgreen/build/NootedGreen.kext
+#   SLEEP=1 zsh src/nootedgreen/build.sh  -> the experimental sleep build (also applies 0003, experimental/sleep)
 # Steps: clone JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe at 24450b4 (the graphics stack this EFI follows), apply
 #   0001-vostroxe-xe-hdmi13.diff  henriquejsza/VostroXe's NootedGreen changes since 6f03560 (XE-HDMI13 etc.)
 #   0002-usbc-dp-alt-mode.diff    USB-C DP alt mode for ADL-P/RPL-P on the TGL framebuffer (this repo, -ngreentc1)
+#   0003-deep-idle-sleep.diff     only with SLEEP=1: Deep Idle sleep support (this repo, experimental/sleep)
 # and run the reference's own build-nootedgreen.sh. Toolchain differences mean the result is not byte-identical to
 # the shipped kext; behaviour is the same.
 set -e
@@ -18,6 +20,7 @@ git -C $work checkout -q -f $COMMIT
 git -C $work clean -q -fd src
 git -C $work apply $here/0001-vostroxe-xe-hdmi13.diff
 git -C $work apply $here/0002-usbc-dp-alt-mode.diff
+[[ ${SLEEP:-0} == 1 ]] && git -C $work apply $here/0003-deep-idle-sleep.diff
 (cd $work && zsh build-nootedgreen.sh)
 rm -rf $here/build/NootedGreen.kext
 cp -R $work/build/NootedGreen.kext $here/build/NootedGreen.kext

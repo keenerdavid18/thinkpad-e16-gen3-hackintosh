@@ -2,7 +2,7 @@
 
 | Issue | Details | Workaround |
 |---|---|---|
-| No system sleep | Modern-Standby-only firmware; a sleep attempt never completes and WindowServer hangs on wake | `pmset` settings in [POST-INSTALL.md](POST-INSTALL.md#power-sleep-and-the-lid); shut down instead |
+| No system sleep | Modern-Standby-only firmware; a sleep attempt never completes and WindowServer hangs on wake | `pmset` settings in [POST-INSTALL.md](POST-INSTALL.md#power-sleep-and-the-lid); shut down instead. Experimental Deep Idle sleep from a USB stick: [experimental/sleep](../experimental/sleep) |
 | GPU hang right after boot | `gpuRestart` report on the copy engine (BCS, signature 2803) shortly after login on most boots | recovers by itself, harmless |
 | Occasional render-engine hang | `gpuRestart` in WindowServer (RCS, `WAIT_ON_SCANLINE`), a known open issue of the NootedGreen stack; recovered as a brief blink | none needed; report patterns upstream |
 | Freeze + restart after a GPU hang | a GPU hang is recovered, but its stuck job is never retired; when the app that owns it closes, the teardown waits forever while holding a lock WindowServer needs: black screen, then a watchdog panic. Seen with Photos' first-time library analysis (idle) and once right after Messages opened. Upstream issue [#31](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe/issues/31) | disable Photos/media analysis (see [POST-INSTALL.md](POST-INSTALL.md#background-gpu-work)); after a visible GPU reset, **don't quit the app that triggered it**: save your work and restart from the Apple menu |
@@ -11,10 +11,11 @@
 | AirDrop is a prerelease driver | ForbiddenItlwm 0.5.3-test1; cold iPhone → Mac connects can take a few seconds | switch back to AirportItlwm: [AIRDROP.md](AIRDROP.md) |
 | Booting with an external display attached | HDMI: both screens stayed black; USB-C dock: one boot in two stalled at the progress bar | connect HDMI / the dock after login ([DISPLAYS.md](DISPLAYS.md)) |
 | No HDMI audio | the HDMI port runs in DVI mode; no audio over the USB-C link either | speakers, headphone jack or a USB audio device |
-| Rare panic on a display-mode change | once: `Gen11::xeLrcaRepair` (NootedGreen GPU recovery) page fault from WindowServer's `setDisplayMode`, during a restart | none yet; report repeats upstream |
+| Rare panic on a display-mode change | `Gen11::xeLrcaRepair` (NootedGreen GPU recovery) page fault from WindowServer's `setDisplayMode` (seen during a restart and on a dock plug): it reads a GPU context that was already freed | fixed in [`src/nootedgreen/0003-deep-idle-sleep.diff`](../src/nootedgreen/0003-deep-idle-sleep.diff) (the experimental sleep build); not yet in the main EFI's kext |
 | Ethernet cable plugged in → higher idle power | with the I219-V linked, the CPU package stays at PC3 (~0.6 W more); Linux doesn't | unplug Ethernet when you don't need it |
 | BTIdle is new | Bluetooth idle suspend (2026-11-11); Bluetooth audio and Bluetooth accessories haven't been tested much | `sudo sysctl debug.btidle.ms=0` (runtime) or boot arg `-btidleoff`; report problems |
 | Internal microphones | DMICs behind the Intel DSP | headset or USB mic |
+| AirPlay to Mac / iPhone Mirroring crash WindowServer (logout), then a black screen | AppleGVA's scaler asserts on this GPU stack; the iPhone's YUV stream blacks out the panel | [tools/iphone-mirroring](../tools/iphone-mirroring): screen mirroring works; AirPlayed app video still turns tiled |
 | Keyboard backlight turns itself back on | YogaSMCNC saved `BacklightTimeout = -1`, which YogaSMC treats as a timeout, so any key press relights it | quit YogaSMCNC, `defaults write org.zhen.YogaSMC BacklightTimeout -int 0`, start it again |
 | WPA3-only Wi-Fi | AirportItlwm limitation | WPA2/WPA3 mixed mode on the router |
 | Pressing the touchpad to click does nothing | VoodooInput presents a Force Touch trackpad but reports no pressure | Trackpad → turn off "Force Click and haptic feedback" |

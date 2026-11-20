@@ -1,0 +1,660 @@
+diff --git a/src/NootedGreen/kern_gen11.cpp b/src/NootedGreen/kern_gen11.cpp
+index 20c930a..ea93c13 100755
+--- a/src/NootedGreen/kern_gen11.cpp
++++ b/src/NootedGreen/kern_gen11.cpp
+@@ -3901,6 +3901,12 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t
+ 			// V410: hook sleep/wake transition methods to intercept panel state tracking.
+ 			// Apple's implementations are known to corrupt WS state on RPL/ADL on resume.
+ 			{"__ZN21AppleIntelFramebuffer17prepareToExitWakeEv",   prepareToExitWake,   this->oprepareToExitWake},
++			// Sleep fix (debug kext): prepareToExitWake -> hwSaveNVRAM calls a platform-expert vtable slot (0x9f8)
++			// that is a reserved stub on a hackintosh -> "IODTPlatformExpert::_RESERVEDIODTPlatformExpert1 called"
++			// panic on the first system sleep. The production kext NOPs that call (f20p); Genx stubs it for ICL.
++			{"__ZN24AppleIntelBaseController11hwSaveNVRAMEv", wrapHwSaveNVRAM},
++			// Sleep: -ngreennodc9 skips Apple's DC9 request (Deep Idle would power the display core off; nothing re-inits it).
++			{"__ZN24AppleIntelBaseController9enableDC9Ev", wrapEnableDC9, this->oEnableDC9},
+ 			{"__ZN21AppleIntelFramebuffer18prepareToEnterWakeEv",  prepareToEnterWake,  this->oprepareToEnterWake},
+ 			{"__ZN21AppleIntelFramebuffer18prepareToExitSleepEv",  prepareToExitSleep,  this->oprepareToExitSleep},
+ 			{"__ZN21AppleIntelFramebuffer19prepareToEnterSleepEv", prepareToEnterSleep, this->oprepareToEnterSleep},
+@@ -4541,6 +4547,10 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t
+ 			 // restoreFromSafeImage skips g_cInitGfxRingContextRCS memcpy (leaves DW1=0x00ffffff).
+ 			 // Writes Gen12 ring context MI_LRI block so ExecList context-restore works on RPL.
+ 			 {"__ZN17IGHardwareContext15initWithOptionsEP11IGAccelTaskRK23IGHardwareContextParamsh", IGHardwareContextinitWithOptions, this->oIGHardwareContextinitWithOptions},
++			 // V509 keeps the last RCS context in lastRCSCtx for xeLrcaRepair; clear it when that context is freed, or a
++			 // later display-mode change (startGraphicsEngine -> xeLrcaRepair "post-start") reads freed memory (page-fault
++			 // panic in Gen11::xeLrcaRepair+0x37, seen 2026-11-13 and 2026-11-17 13:23 on a dock plug).
++			 {"__ZN17IGHardwareContext4freeEv", IGHardwareContextFree, this->oIGHardwareContextFree},
+ 
+ 			 // V144: Hook IGHardwareExtendedContext::initWithOptions so it actually runs with
+ 			 // the resolved Blit3DExtendedCtxParams. Without this, oIGHardwareExtendedContextinitWithOptions
+@@ -7893,6 +7903,31 @@ void Gen11::prepareToEnterWake(AppleIntel::AppleIntelFramebuffer *that)
+ 	logFBCtrlState("prepareToEnterWake<<", that);
+ }
+ 
++// -ngreennodc9: Apple's clientNotify() requests DC9 when every client sleeps; in Deep Idle that powers the display
++// core off and neither Apple's TGL framebuffer nor XE-FBDPMS re-initialises it (black panel after wake).
++static bool xeEdpWakeOn();
++static void xeEdpSleepTeardown();
++uint64_t Gen11::wrapEnableDC9(void *that)
++{
++	static int skip = -1;
++	if (skip < 0) skip = checkKernelArgument("-ngreennodc9") ? 1 : 0;
++	if (skip) {
++		static uint32_t n = 0;
++		if (n++ < 4) IOLog("XeNG NODC9: enableDC9 skipped (%u)\n", n);
++		return 0;
++	}
++	if (xeEdpWakeOn()) xeEdpSleepTeardown();   // XE-EDPWAKE: uninit the display core so DC9 can really power it off
++	return FunctionCast(wrapEnableDC9, callback->oEnableDC9)(that);
++}
++
++// The display-mode NVRAM save is for Apple's boot firmware only; skip it (see the route comment).
++uint32_t Gen11::wrapHwSaveNVRAM(void *that)
++{
++	static uint32_t calls = 0;
++	if (calls++ < 4) SYSLOG("ngreen", "hwSaveNVRAM skipped (call %u)", calls);
++	return 0;
++}
++
+ // Sleep stage 2: NVRAM save, Camellia backlight off, StopTransactions,
+ // disableDisplay, hwSetPanelPower(0), two handleEvent calls, then state=4.
+ void Gen11::prepareToExitWake(AppleIntel::AppleIntelFramebuffer *that)
+@@ -9892,8 +9927,442 @@ void Gen11::wrapWaitForGpuIdle(void *that)
+ // e grava o novo estado; Doze/Sleep -> Wake só reacende. O caminho de vídeo nunca é desmontado, e as trocas de modo
+ // (que não passam por aqui) continuam normais. A XE-NODPMS (filtro de escritas) quebrava as trocas de modo.
+ // -ngreenfbdpms volta ao original.
++// XE-EDPDIAG (-ngreenedpdiag, sleep investigation 2026-11-16): log the eDP display hardware state when XE-FBDPMS
++// fakes FB0's sleep and wake, and 1 s / 3 s / 10 s after the wake, to see what macOS Deep Idle (S0ix) loses.
++// Read-only (MMIO reads only).
++static const uint32_t kEdpDiagRegs[] = {
++	0x45400, 0x45404, 0x45444, 0x45454, 0x45504, 0x45520,   // PWR_WELL_CTL1/2, _AUX2, _DDI2, DC_STATE_EN, DC_STATE_DEBUG
++	0x101084, 0x101088,                                     // DMC DC3->DC5 / DC5->DC6 counters
++	0xC7200, 0xC7204, 0xC7208, 0xC720C, 0xC7210,            // PP_STATUS, PP_CONTROL, PP_ON/OFF_DELAYS, PP_DIVISOR
++	0xC8250, 0xC8254, 0xC8258,                              // BLC_PWM_CTL1, FREQ1, DUTY1
++	0x46000, 0x46010, 0x46014, 0x164280, 0x164284, 0x164288,// CDCLK_CTL, DPLL0/1_ENABLE, DPCLKA_CFGCR0, DPLL0_CFGCR0/1
++	0x64000, 0x64010, 0x60400, 0x60540, 0x60544, 0x46140,   // DDI_BUF_CTL_A, AUX_CH_CTL_A, TRANS_DDI_FUNC_CTL_A, DP_TP_CTL_A, DP_TP_STATUS_A, TRANS_CLK_SEL_A
++	0x70008, 0x6001C, 0x70040, 0x70180, 0x70188, 0x7019C,   // TRANSCONF_A, PIPESRC_A, PIPE_FRMCOUNT_A, PLANE_CTL/STRIDE/SURF_1_A
++	0x162014, 0x162100, 0x64C00,                            // PORT_CL_DW5_A, PORT_COMP_DW0_A, PHY_MISC_A
++};
++static IORegistryEntry *gEdpDiagFb = nullptr;   // FB0, for the ngreen-edpdiag-<tag> properties (readable without root)
++static void xeEdpDiag(const char *tag)
++{
++	if (!NGreen::callback) return;
++	char line[400]; size_t n = 0;
++	static char all[1100]; size_t an = 0;
++	const size_t cnt = sizeof(kEdpDiagRegs) / sizeof(kEdpDiagRegs[0]);
++	for (size_t i = 0; i < cnt; i++) {
++		const uint32_t v = NGreen::callback->readReg32(kEdpDiagRegs[i]);
++		n += snprintf(line + n, sizeof(line) - n, " %x=%x", kEdpDiagRegs[i], v);
++		if (an < sizeof(all)) an += snprintf(all + an, sizeof(all) - an, "%s%x=%x", i ? " " : "", kEdpDiagRegs[i], v);
++		if ((i % 8) == 7 || i == cnt - 1) { IOLog("XeNG EDPDIAG %s:%s\n", tag, line); n = 0; }
++	}
++	if (gEdpDiagFb) {
++		char key[48]; snprintf(key, sizeof(key), "ngreen-edpdiag-%s", tag);
++		gEdpDiagFb->setProperty(key, all);
++	}
++}
++static thread_call_t gEdpDiagTc = nullptr;
++static volatile uint32_t gEdpDiagStep = 0;
++static void xeEdpDiagWorker(thread_call_param_t, thread_call_param_t)
++{
++	static const uint32_t delays[] = {1000, 2000, 7000};   // +1 s, +3 s, +10 s after the wake
++	uint32_t s = gEdpDiagStep;
++	char tag[24]; snprintf(tag, sizeof(tag), "wake+%us", s == 1 ? 1 : s == 2 ? 3 : 10);
++	xeEdpDiag(tag);
++	if (++gEdpDiagStep <= 3 && gEdpDiagTc) {
++		uint64_t dl; clock_interval_to_deadline(delays[gEdpDiagStep - 1], kMillisecondScale, &dl);
++		thread_call_enter_delayed(gEdpDiagTc, dl);
++	}
++}
++static bool xeEdpDiagOn()
++{
++	static int on = -1;
++	if (on < 0) on = checkKernelArgument("-ngreenedpdiag") ? 1 : 0;
++	return on == 1;
++}
++static void xeEdpDiagAfterWake()
++{
++	if (!gEdpDiagTc) gEdpDiagTc = thread_call_allocate(xeEdpDiagWorker, nullptr);
++	if (!gEdpDiagTc) return;
++	gEdpDiagStep = 1;
++	uint64_t dl; clock_interval_to_deadline(1000, kMillisecondScale, &dl);
++	thread_call_enter_delayed(gEdpDiagTc, dl);
++}
++// XE-EDPWAKE (-ngreenedpwake, 2026-11-17): rebuild the eDP output after a Deep Idle sleep in which Apple's enableDC9
++// powered the display core off. Apple's prepareToExitSleep -> restorePowerWellsState -> enableDisplayEngine brings back
++// the power wells, CDCLK and DBUF, but the TGL FB never re-runs the eDP modeset (it cannot train eDP on display 13; at
++// boot it inherits the UEFI-trained link, -ngreenkeepefi), so DPLL1, DDI A, the link and transcoder A stay off and the
++// panel shows nothing. At FB0's sleep (link still up) this saves the eDP path registers and the panel's DPCD (raw AUX
++// A); at the wake, after Apple's restore and only when TRANSCONF_A is off, it replays the gen12 enable sequence (Linux
++// tgl_ddi_pre_enable_dp / intel_dp_link_train order) with UEFI's link parameters and lane levels. Result: property
++// ngreen-edpwake on FB0 (and IOLog "XeNG EDPWAKE").
++static bool xeEdpWakeOn()
++{
++	static int on = -1;
++	if (on < 0) on = checkKernelArgument("-ngreenedpwake") ? 1 : 0;
++	return on == 1;
++}
++static const uint32_t kEdpWakeRegs[] = {
++	0x46014, 0x16428C, 0x164290, 0x164280, 0x46140,            // DPLL1_ENABLE, DPLL1_CFGCR0/1, DPCLKA_CFGCR0, TRANS_CLK_SEL_A
++	0x60000, 0x60004, 0x60008, 0x6000C, 0x60010, 0x60014,      // TRANS_HTOTAL/HBLANK/HSYNC/VTOTAL/VBLANK/VSYNC_A
++	0x6001C, 0x60028, 0x60030, 0x60034, 0x60040, 0x60044,      // PIPESRC_A, VSYNCSHIFT, DATA_M1/N1, LINK_M1/N1
++	0x60400, 0x60404, 0x60540, 0x64000, 0x70008, 0x70030,      // TRANS_DDI_FUNC_CTL(2)_A, DP_TP_CTL_A, DDI_BUF_CTL_A, TRANSCONF_A, PIPE_MISC_A
++	0x68180, 0x68170, 0x68174,                                 // PS_CTRL_1A, PS_WIN_POS_1A, PS_WIN_SZ_1A
++	0x162604, 0x162804, 0x162028, 0x162894,                    // combo PHY A: PCS_DW1 grp/ln0, CL_DW10, TX_DW5 ln0
++	0x162888, 0x162988, 0x162A88, 0x162B88,                    // TX_DW2 ln0-3
++	0x162890, 0x162990, 0x162A90, 0x162B90,                    // TX_DW4 ln0-3
++	0x16289C, 0x16299C, 0x162A9C, 0x162B9C,                    // TX_DW7 ln0-3
++};
++enum { kEwDpll = 0, kEwCfg0, kEwCfg1, kEwDpclka, kEwClkSel, kEwHtot, kEwHblank, kEwHsync, kEwVtot, kEwVblank, kEwVsync,
++	kEwSrc, kEwVshift, kEwDm1, kEwDn1, kEwLm1, kEwLn1, kEwDdiFunc, kEwDdiFunc2, kEwTp, kEwBuf, kEwConf, kEwMisc,
++	kEwPsCtl, kEwPsPos, kEwPsSz, kEwPcsGrp, kEwPcs0, kEwCl10, kEwDw5, kEwDw2, kEwDw4 = kEwDw2 + 4, kEwDw7 = kEwDw4 + 4,
++	kEwCount = kEwDw7 + 4 };
++static_assert(sizeof(kEdpWakeRegs) / sizeof(kEdpWakeRegs[0]) == kEwCount, "edpwake regs");
++static uint32_t gEwSaved[kEwCount];
++// Broad snapshot for the post-replay diff (what else DC9 lost): transcoder A, DDI A function/MSA, DP_TP A, pipe A,
++// scaler 1A, display clocks.
++struct EwRange { uint32_t from, to; };
++static constexpr EwRange kEwRanges[] = {
++	{0x60000, 0x60100}, {0x60400, 0x60420}, {0x60500, 0x60560}, {0x70000, 0x70100}, {0x68100, 0x68200}, {0x46000, 0x46200},
++};
++static constexpr uint32_t ewBroadCount() { uint32_t n = 0; for (auto &r : kEwRanges) n += (r.to - r.from) / 4; return n; }
++static uint32_t gEwBroad[ewBroadCount()];
++static uint32_t gEwMsa;   // TRANS_MSA_MISC_A 0x60410 (bpc / colour format the sink is told)
++static uint8_t gEwCaps[16], gEwCfg[16], gEwRate;   // DPCD 0x000-0x00F, 0x100-0x10F, 0x115
++static bool gEwValid = false;
++static char gEwLog[2400]; static size_t gEwLogN = 0;
++static void ewLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
++static void ewLog(const char *fmt, ...)
++{
++	char b[260]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
++	IOLog("XeNG EDPWAKE %s\n", b);
++	if (gEwLogN < sizeof(gEwLog) - 2) gEwLogN += snprintf(gEwLog + gEwLogN, sizeof(gEwLog) - gEwLogN, "%s%s", gEwLogN ? "; " : "", b);
++}
++static void ewPublish(const char *key)
++{
++	if (gEdpDiagFb) gEdpDiagFb->setProperty(key, gEwLog);
++}
++static inline uint32_t ewRd(uint32_t r) { return NGreen::callback->readReg32(r); }
++static inline void ewWr(uint32_t r, uint32_t v) { NGreen::callback->writeReg32(r, v); }
++static bool ewWait(uint32_t r, uint32_t mask, uint32_t want, uint32_t us)
++{
++	for (uint32_t t = 0; t <= us; t += 10) { if ((ewRd(r) & mask) == want) return true; IODelay(10); }
++	return false;
++}
++// Raw AUX on DDI A (DP_AUX_CH_CTL_A 0x64010, data 0x64014-0x64024; Linux intel_dp_aux_xfer / skl_get_aux_send_ctl).
++// Native AUX only, max 16 data bytes. Returns the number of reply data bytes, or -1.
++static int ewAux(bool write, uint32_t addr, uint8_t *buf, uint32_t len)
++{
++	if (len == 0 || len > 16) return -1;
++	for (int attempt = 0; attempt < 7; attempt++) {
++		if (!ewWait(0x64010, 1u << 31, 0, 10000)) return -1;
++		uint8_t msg[20] = {}; uint32_t n = 4;
++		msg[0] = (uint8_t)(((write ? 0x8 : 0x9) << 4) | ((addr >> 16) & 0xF));
++		msg[1] = (uint8_t)(addr >> 8); msg[2] = (uint8_t)addr; msg[3] = (uint8_t)(len - 1);
++		if (write) { for (uint32_t i = 0; i < len; i++) msg[4 + i] = buf[i]; n += len; }
++		for (uint32_t i = 0; i < n; i += 4)
++			ewWr(0x64014 + i, (uint32_t)msg[i] << 24 | (uint32_t)msg[i + 1] << 16 | (uint32_t)msg[i + 2] << 8 | msg[i + 3]);
++		const uint32_t ctl = (1u << 31) | (1u << 30) | (1u << 28) | (3u << 26) | (1u << 25) | (n << 20) | (23u << 5) | 31u;
++		ewWr(0x64010, ctl);
++		if (!ewWait(0x64010, 1u << 31, 0, 10000)) return -1;
++		const uint32_t st = ewRd(0x64010);
++		ewWr(0x64010, st | (1u << 30) | (1u << 28) | (1u << 25));   // clear done / timeout / receive error
++		if (st & ((1u << 28) | (1u << 25))) { IODelay(400); continue; }
++		const uint32_t got = (st >> 20) & 0x1F;
++		uint8_t rep[20] = {};
++		for (uint32_t i = 0; i < got && i < 20; i += 4) {
++			const uint32_t d = ewRd(0x64014 + i);
++			rep[i] = d >> 24; rep[i + 1] = d >> 16; rep[i + 2] = d >> 8; rep[i + 3] = d;
++		}
++		if (got < 1) { IODelay(400); continue; }
++		const uint8_t r = (rep[0] >> 4) & 3;
++		if (r == 2) { IODelay(500); continue; }          // DEFER
++		if (r != 0) return -1;                           // NACK
++		if (write) return (int)len;
++		const uint32_t dlen = got - 1 < len ? got - 1 : len;
++		for (uint32_t i = 0; i < dlen; i++) buf[i] = rep[1 + i];
++		return (int)dlen;
++	}
++	return -1;
++}
++static bool ewDpcdW(uint32_t addr, uint8_t v) { return ewAux(true, addr, &v, 1) == 1; }
++
++static void xeEdpWakeSave()
++{
++	if (!NGreen::callback || !(ewRd(0x70008) & 0x80000000u)) return;   // only a running eDP path
++	for (uint32_t i = 0; i < kEwCount; i++) gEwSaved[i] = ewRd(kEdpWakeRegs[i]);
++	{ uint32_t n = 0; for (auto &r : kEwRanges) for (uint32_t o = r.from; o < r.to; o += 4) gEwBroad[n++] = ewRd(o); }
++	gEwMsa = ewRd(0x60410);
++	const int a = ewAux(false, 0x000, gEwCaps, 16), b = ewAux(false, 0x100, gEwCfg, 16);
++	uint8_t st[8] = {}; const int c = ewAux(false, 0x200, st, 8);
++	gEwRate = 0; ewAux(false, 0x115, &gEwRate, 1);
++	gEwValid = a == 16 && b == 16;
++	gEwLogN = 0;
++	ewLog("save aux %d/%d/%d valid %d: caps rev %02x maxrate %02x lanes %02x tps3 %u aux_rd %02x | cfg bw %02x lanes %02x tp %02x "
++	      "lvl %02x %02x %02x %02x ds %02x code %02x rate_sel %02x | st %02x %02x %02x",
++	      a, b, c, gEwValid, gEwCaps[0], gEwCaps[1], gEwCaps[2], (gEwCaps[2] >> 6) & 1, gEwCaps[14], gEwCfg[0], gEwCfg[1],
++	      gEwCfg[2], gEwCfg[3], gEwCfg[4], gEwCfg[5], gEwCfg[6], gEwCfg[7], gEwCfg[8], gEwRate, st[2], st[3], st[4]);
++	ewLog("save dpll %x cfgcr %x/%x dpclka %x clksel %x func %x tp %x buf %x conf %x misc %x ps %x pcs %x cl10 %x dw5 %x "
++	      "dw2 %x dw4 %x dw7 %x", gEwSaved[kEwDpll], gEwSaved[kEwCfg0], gEwSaved[kEwCfg1], gEwSaved[kEwDpclka],
++	      gEwSaved[kEwClkSel], gEwSaved[kEwDdiFunc], gEwSaved[kEwTp], gEwSaved[kEwBuf], gEwSaved[kEwConf],
++	      gEwSaved[kEwMisc], gEwSaved[kEwPsCtl], gEwSaved[kEwPcs0], gEwSaved[kEwCl10], gEwSaved[kEwDw5],
++	      gEwSaved[kEwDw2], gEwSaved[kEwDw4], gEwSaved[kEwDw7]);
++	ewPublish("ngreen-edpwake-save");
++}
++
++// Sink link training with the saved (UEFI) levels; source levels stay as programmed in the combo PHY.
++static bool ewTrain(uint32_t lanes, uint32_t tpBase)
++{
++	const uint8_t lvl[4] = {gEwCfg[3], gEwCfg[4], gEwCfg[5], gEwCfg[6]};
++	const uint8_t laneMask = lanes == 1 ? 0x01 : lanes == 2 ? 0x11 : 0x11;   // per status byte (2 lanes per byte)
++	auto status = [&](uint8_t *s) { return ewAux(false, 0x202, s, 6) == 6; };
++	// clock recovery: TPS1, scrambling disabled
++	ewWr(0x60540, tpBase | (0u << 8));
++	uint8_t tp1[5] = {0x21, lvl[0], lvl[1], lvl[2], lvl[3]};
++	if (ewAux(true, 0x102, tp1, 1 + lanes) < 0) { ewLog("TPS1 write failed"); return false; }
++	uint8_t s[6] = {}; bool cr = false;
++	for (int i = 0; i < 6 && !cr; i++) {
++		IODelay(500);
++		if (!status(s)) continue;
++		cr = (s[0] & laneMask) == laneMask && (lanes < 4 || (s[1] & 0x11) == 0x11);
++	}
++	ewLog("CR %s: st %02x %02x align %02x adj %02x %02x", cr ? "ok" : "FAIL", s[0], s[1], s[2], s[4], s[5]);
++	if (!cr) return false;
++	// channel equalisation: TPS3 when the sink supports it (needed at HBR2+), else TPS2
++	const bool tps3 = (gEwCaps[2] >> 6) & 1;
++	ewWr(0x60540, tpBase | ((tps3 ? 4u : 1u) << 8));
++	uint8_t tp2[5] = {(uint8_t)(0x20 | (tps3 ? 3 : 2)), lvl[0], lvl[1], lvl[2], lvl[3]};
++	if (ewAux(true, 0x102, tp2, 1 + lanes) < 0) { ewLog("TPS%u write failed", tps3 ? 3 : 2); return false; }
++	const uint32_t eqUs = (gEwCaps[14] & 0x7F) ? (gEwCaps[14] & 0x7F) * 4000u : 400u;
++	const uint8_t eqMask = lanes == 1 ? 0x07 : 0x77;
++	bool eq = false;
++	for (int i = 0; i < 6 && !eq; i++) {
++		IODelay(eqUs);
++		if (!status(s)) continue;
++		eq = (s[0] & eqMask) == eqMask && (lanes < 4 || (s[1] & 0x77) == 0x77) && (s[2] & 1);
++	}
++	ewLog("EQ(TPS%u) %s: st %02x %02x align %02x adj %02x %02x", tps3 ? 3 : 2, eq ? "ok" : "FAIL", s[0], s[1], s[2], s[4], s[5]);
++	return eq;
++}
++
++// XE-EDPWAKE teardown (from wrapEnableDC9, i.e. Apple's clientNotify once every client sleeps, before DC_STATE_EN=DC9):
++// Apple's overridePowerWellsState(false) leaves DBUF and the CTL1 well requests on here (measured at the halt: DBUF_CTL_S1
++// 0xc0000000, CTL1 0x40f, Display_VNN_REQ set, package PC2 99 %). Linux icl_display_core_uninit order, after the eDP
++// output is shut down (plane, transcoder, link, panel power, DPLL1). The wake replay rebuilds all of it.
++static uint32_t gEwPpCtl;   // PP_CONTROL before the panel was powered off (0 = panel left alone)
++static void xeEdpSleepTeardown()
++{
++	if (!NGreen::callback || !gEwValid) return;
++	gEwLogN = 0;
++	ewLog("teardown: wells %x/%x aux %x ddi %x dbuf %x/%x cdpll %x cdclk %x dpll %x buf %x conf %x pp %x/%x", ewRd(0x45400),
++	      ewRd(0x45404), ewRd(0x45444), ewRd(0x45454), ewRd(0x45008), ewRd(0x44FE8), ewRd(0x46070), ewRd(0x46000), ewRd(0x46014),
++	      ewRd(0x64000), ewRd(0x70008), ewRd(0xC7200), ewRd(0xC7204));
++	// 1. planes / cursor off, transcoder A off
++	if (ewRd(0x70180) & 0x80000000u) { ewWr(0x70180, ewRd(0x70180) & ~0x80000000u); ewWr(0x7019C, ewRd(0x7019C)); }
++	if (ewRd(0x70080) & 0x27u) { ewWr(0x70080, 0); ewWr(0x70084, ewRd(0x70084)); }
++	bool stopped = true;
++	if (ewRd(0x70008) & 0x80000000u) {
++		ewWr(0x70008, ewRd(0x70008) & ~0x80000000u);
++		stopped = ewWait(0x70008, 1u << 30, 0, 60000);
++	}
++	ewWr(0x60400, ewRd(0x60400) & ~0x80000000u);
++	// 2. link off: sink D3, DDI buffer + DP_TP_CTL off
++	if (ewRd(0x64000) & 0x80000000u) ewDpcdW(0x600, 0x02);
++	ewWr(0x64000, ewRd(0x64000) & ~0x80000000u);
++	ewWr(0x60540, ewRd(0x60540) & ~0x80000000u);
++	const bool idle = ewWait(0x64000, 1u << 7, 1u << 7, 2000);
++	// 3. panel power off (eDP PPS); the wake replay powers it back on before training
++	gEwPpCtl = 0;
++	if (ewRd(0xC7204) & 1u) {
++		gEwPpCtl = ewRd(0xC7204);
++		ewWr(0xC7204, gEwPpCtl & ~0x5u);                                   // power target off, backlight enable off
++		for (int i = 0; i < 60 && (ewRd(0xC7200) & 0x80000000u); i++) IODelay(10000);   // no IOSleep: Apple holds its locks here
++	}
++	// 4. DPLL1 off, DDI A clock gated (DPCLKA_CFGCR0 bit 10)
++	ewWr(0x46014, ewRd(0x46014) & ~0x80000000u);
++	const bool unlocked = ewWait(0x46014, 1u << 30, 0, 5000);
++	ewWr(0x46014, ewRd(0x46014) & ~(1u << 27));
++	ewWait(0x46014, 1u << 26, 0, 5000);
++	ewWr(0x164280, ewRd(0x164280) | (1u << 10));
++	// 5. core: DBUF slices, CDCLK PLL, then the power-well requests (both CTL1 BIOS and CTL2 driver), PW1 last
++	ewWr(0x45008, ewRd(0x45008) & ~0x80000000u); ewWr(0x44FE8, ewRd(0x44FE8) & ~0x80000000u);
++	const bool dbufOff = ewWait(0x45008, 1u << 30, 0, 2000) && ewWait(0x44FE8, 1u << 30, 0, 2000);
++	ewWr(0x46070, ewRd(0x46070) & ~0x80000000u);
++	const bool cdOff = ewWait(0x46070, 1u << 30, 0, 2000);
++	ewWr(0x45444, ewRd(0x45444) & ~0xAAAAAAAAu); ewWr(0x45440, ewRd(0x45440) & ~0xAAAAAAAAu);   // AUX wells
++	ewWr(0x45454, ewRd(0x45454) & ~0xAAAAAAAAu); ewWr(0x45450, ewRd(0x45450) & ~0xAAAAAAAAu);   // DDI IO wells
++	ewWr(0x45404, ewRd(0x45404) & 0x3u & ~0u); ewWr(0x45400, ewRd(0x45400) & 0x3u);              // all but PW1
++	const bool pwOff = ewWait(0x45404, 0xFFFFFFFCu & 0x55555555u, 0, 5000);
++	ewWr(0x45404, ewRd(0x45404) & ~0x2u); ewWr(0x45400, ewRd(0x45400) & ~0x2u);                  // PW1
++	const bool pw1Off = ewWait(0x45404, 1u, 0, 5000);
++	ewLog("teardown done: pipe stopped %d buf idle %d panel pp %x/%x dpll unlocked %d dbuf off %d cdpll off %d wells off %d pw1 off %d "
++	      "-> wells %x/%x dbuf %x cdpll %x", stopped, idle, ewRd(0xC7200), ewRd(0xC7204), unlocked, dbufOff, cdOff, pwOff, pw1Off,
++	      ewRd(0x45400), ewRd(0x45404), ewRd(0x45008), ewRd(0x46070));
++	ewPublish("ngreen-edpwake-teardown");
++}
++
++static void xeEdpWakeReplay()
++{
++	if (!xeEdpWakeOn() || !gEwValid || !NGreen::callback) return;
++	if (ewRd(0x70008) & 0x80000000u) return;   // transcoder A still running: nothing lost
++	gEwLogN = 0;
++	const uint32_t *S = gEwSaved;
++	if (gEwPpCtl && !(ewRd(0xC7200) & 0x80000000u)) {                    // panel powered off by the teardown
++		ewWr(0xC7204, gEwPpCtl);
++		int t = 0;
++		for (; t < 80 && (ewRd(0xC7200) & 0xB0000000u) != 0x80000000u; t++) IOSleep(10);   // on, no sequence in progress
++		ewLog("panel power on: pp %x/%x after %d ms", ewRd(0xC7200), ewRd(0xC7204), t * 10);
++	}
++	ewLog("replay: wells %x/%x dc %x cdclk %x dpll %x buf %x conf %x func %x", ewRd(0x45400), ewRd(0x45404), ewRd(0x45504),
++	      ewRd(0x46000), ewRd(0x46014), ewRd(0x64000), ewRd(0x70008), ewRd(0x60400));
++	// 1. DPLL1: power, config, enable + lock
++	if (!(ewRd(0x46014) & (1u << 30))) {
++		ewWr(0x46014, ewRd(0x46014) | (1u << 27));
++		const bool pw = ewWait(0x46014, 1u << 26, 1u << 26, 5000);
++		ewWr(0x16428C, S[kEwCfg0]); ewWr(0x164290, S[kEwCfg1]); (void)ewRd(0x164290);
++		ewWr(0x46014, ewRd(0x46014) | (1u << 31));
++		const bool lk = ewWait(0x46014, 1u << 30, 1u << 30, 5000);
++		ewLog("dpll1 power %d lock %d -> %x (cfgcr %x/%x)", pw, lk, ewRd(0x46014), ewRd(0x16428C), ewRd(0x164290));
++		if (!lk) { ewPublish("ngreen-edpwake"); return; }
++	}
++	// 2. DDI A clock (DPLL1, clock on) and the transcoder clock
++	ewWr(0x164280, S[kEwDpclka]);
++	ewWr(0x46140, S[kEwClkSel]);
++	// 3. transcoder A timings / M/N / pipe source, transcoder function configured but not yet enabled
++	for (uint32_t i = kEwHtot; i <= kEwLn1; i++) ewWr(kEdpWakeRegs[i], S[i]);
++	ewWr(0x70030, S[kEwMisc]);
++	ewWr(0x60404, S[kEwDdiFunc2]);
++	ewWr(0x60400, S[kEwDdiFunc] & ~0x80000000u);
++	ewWr(0x60410, gEwMsa);                                                  // MSA: bpc / colour format
++	// 4. combo PHY A lane levels: only if DC9 lost them (restore UEFI's raw values, Linux icl_combo_phy_set_signal_levels order)
++	bool lost = false;
++	for (uint32_t i = 0; i < 4; i++)
++		lost |= ewRd(kEdpWakeRegs[kEwDw2 + i]) != S[kEwDw2 + i] || ewRd(kEdpWakeRegs[kEwDw4 + i]) != S[kEwDw4 + i] ||
++		        ewRd(kEdpWakeRegs[kEwDw7 + i]) != S[kEwDw7 + i];
++	lost |= ewRd(0x162894) != S[kEwDw5] || ewRd(0x162028) != S[kEwCl10];
++	if (lost) {
++		ewWr(0x162694, ewRd(0x162894) & ~0x80000000u);                       // TX_DW5 grp: training off
++		for (uint32_t i = 0; i < 4; i++) {
++			ewWr(kEdpWakeRegs[kEwDw2 + i], S[kEwDw2 + i]);
++			ewWr(kEdpWakeRegs[kEwDw4 + i], S[kEwDw4 + i]);
++			ewWr(kEdpWakeRegs[kEwDw7 + i], S[kEwDw7 + i]);
++		}
++		ewWr(0x162028, S[kEwCl10]);
++		ewWr(0x162694, S[kEwDw5]);                                          // TX_DW5 grp: saved (training enabled)
++	}
++	ewLog("phy levels %s: dw2 %x dw4 %x dw7 %x dw5 %x cl10 %x", lost ? "RESTORED" : "kept", ewRd(0x162888), ewRd(0x162890),
++	      ewRd(0x16289C), ewRd(0x162894), ewRd(0x162028));
++	// 5. sink: D0, link rate / lanes / downspread / coding
++	const uint32_t lanes = gEwCfg[1] & 0x1F;
++	bool ok = ewDpcdW(0x600, 0x01);
++	IOSleep(1);
++	if (gEwCfg[0]) ok &= ewDpcdW(0x100, gEwCfg[0]); else ok &= ewDpcdW(0x115, gEwRate);
++	ok &= ewDpcdW(0x101, gEwCfg[1]);
++	ok &= ewDpcdW(0x107, gEwCfg[7]);
++	ok &= ewDpcdW(0x108, gEwCfg[8] ? gEwCfg[8] : 1);
++	ewLog("sink config %s: bw %02x rate_sel %02x lanes %u", ok ? "ok" : "FAIL", gEwCfg[0], gEwRate, lanes);
++	// 6. source: DP_TP_CTL enabled with TPS1, DDI buffer on
++	const uint32_t tpBase = (1u << 31) | (S[kEwTp] & (1u << 18));          // enable + enhanced framing as before
++	ewWr(0x60540, tpBase);
++	ewWr(0x64000, S[kEwBuf] | 0x80000000u);
++	IODelay(600);
++	const bool active = ewWait(0x64000, 1u << 7, 0, 2000);
++	ewLog("ddi buf %x active %d", ewRd(0x64000), active);
++	const bool trained = ok && lanes >= 1 && lanes <= 4 && ewTrain(lanes, tpBase);
++	// 7. normal pixels, transcoder function + transcoder on (also after a failed training, to see what the panel shows)
++	ewWr(0x60540, tpBase | (2u << 8));                                      // idle pattern
++	IODelay(100);
++	ewWr(0x60540, tpBase | (3u << 8));                                      // normal
++	ewDpcdW(0x102, 0x00);
++	ewWr(0x60400, S[kEwDdiFunc] | 0x80000000u);
++	if (S[kEwPsCtl] & 0x80000000u) { ewWr(0x68170, S[kEwPsPos]); ewWr(0x68174, S[kEwPsSz]); ewWr(0x68180, S[kEwPsCtl]); }
++	ewWr(0x70008, S[kEwConf] & ~(1u << 30));
++	const bool running = ewWait(0x70008, 1u << 30, 1u << 30, 50000);
++	IOSleep(40);
++	ewLog("done trained %d running %d: conf %x func %x tp %x tpst %x frm %x", trained, running, ewRd(0x70008), ewRd(0x60400),
++	      ewRd(0x60540), ewRd(0x60544), ewRd(0x70040));
++	// what else differs from the pre-sleep state (frame/flip counters, timestamps and plane surface addresses excluded)
++	{
++		uint32_t n = 0, diffs = 0; char line[150]; size_t ln = 0;
++		for (auto &r : kEwRanges)
++			for (uint32_t o = r.from; o < r.to; o += 4, n++) {
++				if ((o >= 0x70040 && o <= 0x7004C) || o == 0x7019C || o == 0x701AC) continue;
++				const uint32_t now = ewRd(o);
++				if (now == gEwBroad[n]) continue;
++				diffs++;
++				if (ln < sizeof(line) - 30) ln += snprintf(line + ln, sizeof(line) - ln, " %x:%x>%x", o, gEwBroad[n], now);
++				else { ewLog("diff%s", line); ln = 0; ln += snprintf(line + ln, sizeof(line) - ln, " %x:%x>%x", o, gEwBroad[n], now); }
++			}
++		if (ln) ewLog("diff%s", line);
++		ewLog("msa %x (saved %x), %u registers differ from sleep", ewRd(0x60410), gEwMsa, diffs);
++	}
++	ewPublish("ngreen-edpwake");
++}
+ static uint32_t gXeFbBlcCtl = 0, gXeFbBlcDuty = 0;
+ static bool gXeFbFake = false;
++// XE-FB0PM (-ngreenfb0pm, 2026-11-16): XE-FBDPMS skips all four Apple lifecycle functions for FB0. Two of them
++// (prepareToExitWake / prepareToEnterWake) tear down and rebuild the pipe - still skipped. The other two are system-sleep
++// bookkeeping: prepareToEnterSleep = clientNotify(2,0) + handleEvent(kIOFBNotifyWillSleep) + hwSaveState, and
++// prepareToExitSleep = hwRestoreState + clientNotify(2,1) + handleEvent(kIOFBNotifyDidWake). Without FB0's DidWake the
++// accelerator never restarts its engines after a Deep Idle wake (WindowServer hangs, panel shows an unrendered
++// buffer). Run those two for FB0 when it really enters / leaves power state 0 (Sleep).
++// XE-WAKEBLANK (on with -ngreenfb0pm, -ngreennowakeblank disables): backlight stays off after a system-sleep wake
++// until the primary plane (PLANE_SURF_1_A 0x7019C) has flipped twice, max 3 s; while holding, BLC_CTL bit 31 is kept
++// off in case Apple's panel code turns it on early.
++static thread_call_t gWakeBlankTc = nullptr;
++static volatile uint32_t gWakeBlankTicks = 0, gWakeBlankFlips = 0, gWakeBlankSurf = 0;
++static bool xeWakeBlankOn()
++{
++	static int on = -1;
++	if (on < 0) on = (checkKernelArgument("-ngreenfb0pm") && !checkKernelArgument("-ngreennowakeblank")) ? 1 : 0;
++	return on == 1;
++}
++static void xeWakeBlankTick(thread_call_param_t, thread_call_param_t)
++{
++	auto *cb = NGreen::callback;
++	if (!cb) return;
++	const uint32_t s = cb->readReg32(0x7019C) & 0xFFFFF000u;
++	if (s != gWakeBlankSurf) { gWakeBlankSurf = s; gWakeBlankFlips++; }
++	gWakeBlankTicks++;
++	if (gWakeBlankFlips >= 2 || gWakeBlankTicks >= 60) {          // 60 x 50 ms = 3 s
++		if (gXeFbBlcDuty) cb->writeReg32(0xC8258, gXeFbBlcDuty);
++		cb->writeReg32(0xC8250, gXeFbBlcCtl | 0x80000000u);
++		IOLog("XeNG WAKEBLANK: backlight on after %u ms, %u flips\n", gWakeBlankTicks * 50, gWakeBlankFlips);
++		return;
++	}
++	const uint32_t blc = cb->readReg32(0xC8250);
++	if (blc & 0x80000000u) cb->writeReg32(0xC8250, blc & ~0x80000000u);
++	uint64_t dl; clock_interval_to_deadline(50, kMillisecondScale, &dl);
++	thread_call_enter_delayed(gWakeBlankTc, dl);
++}
++static void xeWakeBlankStart()
++{
++	if (!gWakeBlankTc) gWakeBlankTc = thread_call_allocate(xeWakeBlankTick, nullptr);
++	if (!gWakeBlankTc || !NGreen::callback) {
++		if (NGreen::callback) {
++			if (gXeFbBlcDuty) NGreen::callback->writeReg32(0xC8258, gXeFbBlcDuty);
++			NGreen::callback->writeReg32(0xC8250, gXeFbBlcCtl | 0x80000000u);
++		}
++		return;
++	}
++	gWakeBlankTicks = 0; gWakeBlankFlips = 0;
++	gWakeBlankSurf = NGreen::callback->readReg32(0x7019C) & 0xFFFFF000u;
++	uint64_t dl; clock_interval_to_deadline(50, kMillisecondScale, &dl);
++	thread_call_enter_delayed(gWakeBlankTc, dl);
++}
++
++void Gen11::xeFb0Pm(void *that, uint32_t cur, uint32_t state)
++{
++	static int on = -1;
++	if (on < 0) on = checkKernelArgument("-ngreenfb0pm") ? 1 : 0;
++	if (!on || cur == state) return;
++	auto *fb = static_cast<AppleIntel::AppleIntelFramebuffer *>(that);
++	if (state == 0) {
++		IOLog("XeNG FB0PM: FB0 %u -> 0: prepareToEnterSleep\n", cur);
++		prepareToEnterSleep(fb);
++	} else if (cur == 0) {
++		IOLog("XeNG FB0PM: FB0 0 -> %u: prepareToExitSleep\n", state);
++		prepareToExitSleep(fb);
++		xeEdpWakeReplay();
++	}
++}
+ IOReturn Gen11::wrapSetFramebufferPowerState(void *that, unsigned int state)
+ {
+ 	static int on = -1;
+@@ -9903,24 +10372,37 @@ IOReturn Gen11::wrapSetFramebufferPowerState(void *that, unsigned int state)
+ 		uint32_t cur = *reinterpret_cast<uint32_t *>(fb + 0x4284);
+ 		if (state > 2) state = 2;
+ 		if (cur == 2 && state < 2) {
++			if (xeEdpDiagOn()) { gEdpDiagFb = reinterpret_cast<IORegistryEntry *>(that); xeEdpDiag("sleep"); }
++			if (xeEdpWakeOn()) { gEdpDiagFb = reinterpret_cast<IORegistryEntry *>(that); xeEdpWakeSave(); }
+ 			gXeFbBlcCtl = NGreen::callback->readReg32(0xC8250);
+ 			gXeFbBlcDuty = NGreen::callback->readReg32(0xC8258);
+ 			NGreen::callback->writeReg32(0xC8250, gXeFbBlcCtl & ~0x80000000u);   // luz de fundo off
+ 			*reinterpret_cast<uint32_t *>(fb + 0x4284) = state;
+ 			gXeFbFake = true; gXeFbDpmsN++;
+ 			IOLog("XeNG FBDPMS: FB0 %u -> %u: só luz de fundo off (BLC_CTL 0x%x duty 0x%x)\n", cur, state, gXeFbBlcCtl, gXeFbBlcDuty);
++			xeFb0Pm(that, cur, state);
+ 			return kIOReturnSuccess;
+ 		}
+ 		if (cur < 2 && state < 2 && gXeFbFake) {           // Doze <-> Sleep enquanto "dormindo": só registra
+ 			*reinterpret_cast<uint32_t *>(fb + 0x4284) = state;
++			xeFb0Pm(that, cur, state);
+ 			return kIOReturnSuccess;
+ 		}
+ 		if (cur < 2 && state == 2 && gXeFbFake) {
+-			if (gXeFbBlcDuty) NGreen::callback->writeReg32(0xC8258, gXeFbBlcDuty);
+-			NGreen::callback->writeReg32(0xC8250, gXeFbBlcCtl | 0x80000000u);   // luz de fundo on
++			if (xeEdpDiagOn()) xeEdpDiag("wake-before");
++			xeFb0Pm(that, cur, state);
++			if (cur == 0 && xeWakeBlankOn()) {
++				// XE-WAKEBLANK: after a system sleep the plane shows a buffer the GPU has not drawn yet (stripes) until
++				// WindowServer renders and flips; keep the backlight off until two flips (or 3 s), see xeWakeBlankTick.
++				xeWakeBlankStart();
++			} else {
++				if (gXeFbBlcDuty) NGreen::callback->writeReg32(0xC8258, gXeFbBlcDuty);
++				NGreen::callback->writeReg32(0xC8250, gXeFbBlcCtl | 0x80000000u);   // luz de fundo on
++			}
+ 			*reinterpret_cast<uint32_t *>(fb + 0x4284) = 2;
+ 			gXeFbFake = false; gXeFbDpmsN++;
+ 			IOLog("XeNG FBDPMS: FB0 %u -> 2: luz de fundo on\n", cur);
++			if (xeEdpDiagOn()) { xeEdpDiag("wake-after"); xeEdpDiagAfterWake(); }
+ 			return kIOReturnSuccess;
+ 		}
+ 	}
+@@ -10518,6 +11000,12 @@ uint64_t Gen11::IGHardwareContextinitWithOptions(void *that, void *task, const v
+ //   0x00ffffff after initWithOptions, then writes the correct Gen12 ring context MI_LRI block to
+ //   GGTT[0x19] (ExecList submission slot for page1) via aperture.  Without this, hardware sees
+ //   MI_NOOP at DW1, skips all register restore, ring state is undefined, context posts IDLE.
++void Gen11::IGHardwareContextFree(void *that)
++{
++	if (NGreen::callback && that && NGreen::callback->lastRCSCtx == that) NGreen::callback->lastRCSCtx = nullptr;
++	FunctionCast(IGHardwareContextFree, callback->oIGHardwareContextFree)(that);
++}
++
+ void *Gen11::IGHardwareContextwithOptions(void *task, const void *params, uint8_t arg)
+ {
+ 	void *ctx = FunctionCast(IGHardwareContextwithOptions,
+diff --git a/src/NootedGreen/kern_gen11.hpp b/src/NootedGreen/kern_gen11.hpp
+index 9b288c7..8487dc0 100755
+--- a/src/NootedGreen/kern_gen11.hpp
++++ b/src/NootedGreen/kern_gen11.hpp
+@@ -1476,10 +1476,14 @@ private:
+ 	
+ 	// Sleep/wake transition hooks
+ 	static void prepareToExitWake(AppleIntel::AppleIntelFramebuffer *that);
++	static uint32_t wrapHwSaveNVRAM(void *that);
++	static uint64_t wrapEnableDC9(void *that);
++	mach_vm_address_t oEnableDC9 {};
+ 	mach_vm_address_t oprepareToExitWake {};
+ 	static void prepareToExitSleep(AppleIntel::AppleIntelFramebuffer *that);
+ 	mach_vm_address_t oprepareToExitSleep {};
+ 	static void prepareToEnterSleep(AppleIntel::AppleIntelFramebuffer *that);
++	static void xeFb0Pm(void *that, uint32_t cur, uint32_t state);
+ 	mach_vm_address_t oprepareToEnterSleep {};
+ 	
+ 	static void hwInitializeCState(AppleIntel::AppleIntelBaseController *that);
+@@ -1837,6 +1841,8 @@ private:
+ 	// immediately after initWithOptions runs (wbinvd flushes LLC→DRAM for accurate aperture read).
+ 	static void *IGHardwareContextwithOptions(void *task, const void *params, uint8_t arg);
+ 	mach_vm_address_t oIGHardwareContextwithOptions {};
++	static void IGHardwareContextFree(void *that);
++	mach_vm_address_t oIGHardwareContextFree {};
+ 
+ 	// V509: Base class IGHardwareContext::initWithOptions hook — CPU-side LRCA page1 repair.
+ 	// restoreFromSafeImage returns true on RPL (skips g_cInitGfxRingContextRCS memcpy), leaving
+diff --git a/src/NootedGreen/kern_green.cpp b/src/NootedGreen/kern_green.cpp
+index 44949b4..fe32d3b 100755
+--- a/src/NootedGreen/kern_green.cpp
++++ b/src/NootedGreen/kern_green.cpp
+@@ -10,6 +10,7 @@
+ #include "kern_patcherplus.hpp"
+ #include <Headers/kern_api.hpp>
+ #include <Headers/kern_devinfo.hpp>
++#include <IOKit/pwr_mgt/RootDomain.h>
+ 
+ 
+ static const char *pathIOAcceleratorFamily2= "/System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2";
+@@ -19,6 +20,38 @@ static const char *pathBacklight = "/System/Library/Extensions/AppleBacklight.ke
+ static const char *pathMCCSControl = "/System/Library/Extensions/AppleMCCSControl.kext/Contents/MacOS/AppleMCCSControl";
+ static const char *pathIOGraphics= "/System/Library/Extensions/IOGraphicsFamily.kext/IOGraphicsFamily";
+ 
++// XE-NVMEKEEP (-ngreennvmekeep, 2026-11-18): Deep Idle without shutting the NVMe controllers down. macOS's
++// IONVMeController::HandleControllerPowerOff() calls ShutdownNVMe() (CC.SHN) on every sleep; in Deep Idle a shut-down
++// drive (D3 or D0) pins the package at PC2/PC3 - Linux s2idle keeps the controller live (APST/PS4) and reaches PC10 on
++// this laptop (linux/results/nvme-state-test-2026-11-18-1230.txt). The wake path is safe without the shutdown:
++// InitializeNVMe -> EnableController() writes CC=0 and waits for RDY=0 before re-creating the queues (disassembly,
++// 25G241). Only when the root domain's IOPMSystemSleepType is 7 (Deep Idle) and no system shutdown/restart started
++// (systemWillShutdown latch). Use with S0ixStandby debug.s0ix.nvme=1 (PCI D0 for the halt).
++static const char *pathIONVMe = "/System/Library/Extensions/IONVMeFamily.kext/Contents/MacOS/IONVMeFamily";
++static KernelPatcher::KextInfo kextIONVMe {"com.apple.iokit.IONVMeFamily", &pathIONVMe, 1, {true}, {},
++	KernelPatcher::KextInfo::Unloaded};
++static mach_vm_address_t gOrgNvmePowerOff = 0, gOrgNvmeWillShutdown = 0;
++static volatile bool gNvmeShuttingDown = false;
++static volatile uint32_t gNvmeKeepN = 0;
++static void wrapNvmeHandleControllerPowerOff(void *that)
++{
++	bool deepIdle = false;
++	if (IOPMrootDomain *root = IOService::getPMRootDomain())
++		if (OSNumber *n = OSDynamicCast(OSNumber, root->getProperty("IOPMSystemSleepType")))
++			deepIdle = n->unsigned32BitValue() == 7;
++	if (deepIdle && !gNvmeShuttingDown) {
++		gNvmeKeepN++;
++		IOLog("XeNG NVMEKEEP: Deep Idle - NVMe controller %p left running (no ShutdownNVMe), %u\n", that, gNvmeKeepN);
++		return;
++	}
++	FunctionCast(wrapNvmeHandleControllerPowerOff, gOrgNvmePowerOff)(that);
++}
++static IOReturn wrapNvmeSystemWillShutdown(void *that, unsigned int specifier)
++{
++	gNvmeShuttingDown = true;
++	return FunctionCast(wrapNvmeSystemWillShutdown, gOrgNvmeWillShutdown)(that, specifier);
++}
++
+ static KernelPatcher::KextInfo kextAGDP {"com.apple.driver.AppleGraphicsDevicePolicy", &pathAGDP, 1, {true}, {},
+ 	KernelPatcher::KextInfo::Unloaded};
+ static KernelPatcher::KextInfo kextBacklight {"com.apple.driver.AppleBacklight", &pathBacklight, 1, {true}, {},
+@@ -152,6 +185,7 @@ void NGreen::init() {
+ 	lilu.onKextLoadForce(&kextMCCSControl);
+ 	lilu.onKextLoadForce(&kextIOGraphics);*/
+ 	lilu.onKextLoadForce(&kextIOAcceleratorFamily2);
++	if (checkKernelArgument("-ngreennvmekeep")) lilu.onKextLoadForce(&kextIONVMe);
+ 	
+ 	genx.init();
+ 	gen11.init();
+@@ -503,6 +537,16 @@ static IOReturn wrapSetIdMode(void *that, uint32_t id, uint32_t mode) {
+ }
+ 
+ bool NGreen::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
++	if (kextIONVMe.loadIndex == index) {
++		RouteRequestPlus requests[] = {
++			{"__ZN16IONVMeController24HandleControllerPowerOffEv", wrapNvmeHandleControllerPowerOff, gOrgNvmePowerOff},
++			{"__ZN16IONVMeController18systemWillShutdownEj", wrapNvmeSystemWillShutdown, gOrgNvmeWillShutdown},
++		};
++		const bool ok = RouteRequestPlus::routeAll(patcher, index, requests, address, size);
++		SYSLOG("ngreen", "XE-NVMEKEEP: IONVMeFamily routes %s", ok ? "installed" : "FAILED");
++		if (!ok) patcher.clearError();
++		return true;
++	}
+ 	if (kextIOAcceleratorFamily2.loadIndex == index) {
+ 		SYSLOG("NGreen", "IOAccelF2: TEXT 0x%llx size 0x%lx", address, size);
+ 		

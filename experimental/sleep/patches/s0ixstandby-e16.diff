@@ -1,0 +1,1648 @@
+diff --git a/.github/ISSUE_TEMPLATE/config.yml b/.github/ISSUE_TEMPLATE/config.yml
+new file mode 100644
+index 0000000..b873be2
+--- /dev/null
++++ b/.github/ISSUE_TEMPLATE/config.yml
+@@ -0,0 +1,5 @@
++blank_issues_enabled: true
++contact_links:
++  - name: Graphics problems (acceleration, external displays, GPU restarts)
++    url: https://github.com/b00t0x/WhateverXe/issues
++    about: Display and GPU driver issues belong to the graphics driver, not S0ixStandby.
+diff --git a/.github/ISSUE_TEMPLATE/feature_request.yml b/.github/ISSUE_TEMPLATE/feature_request.yml
+new file mode 100644
+index 0000000..15ff104
+--- /dev/null
++++ b/.github/ISSUE_TEMPLATE/feature_request.yml
+@@ -0,0 +1,20 @@
++name: Feature request or question
++description: An idea, a question about how it works, or support for a new platform
++labels: ["enhancement"]
++body:
++  - type: textarea
++    id: request
++    attributes:
++      label: Request or question
++    validations:
++      required: true
++  - type: input
++    id: machine
++    attributes:
++      label: Computer model and CPU (if relevant)
++      placeholder: HP EliteBook 840 G8, i7-1185G7
++  - type: textarea
++    id: context
++    attributes:
++      label: Context
++      description: What you tried, relevant output (remove personal information).
+diff --git a/.github/ISSUE_TEMPLATE/sleep_report.yml b/.github/ISSUE_TEMPLATE/sleep_report.yml
+new file mode 100644
+index 0000000..5038bd4
+--- /dev/null
++++ b/.github/ISSUE_TEMPLATE/sleep_report.yml
+@@ -0,0 +1,118 @@
++name: Sleep / wake problem or test report
++description: Deep Idle doesn't enter, doesn't wake, hangs, or you tested a new machine
++labels: ["report"]
++body:
++  - type: markdown
++    attributes:
++      value: |
++        Thanks for testing. Please remove personal information (serial numbers, MAC addresses, host and user names, SSIDs) from anything you paste. `tools/redact.sh` does most of it.
++  - type: checkboxes
++    id: checks
++    attributes:
++      label: Before you report
++      options:
++        - label: The CPU is Intel (AMD is not supported, see the README)
++          required: true
++        - label: "`ioreg -rd1 -c IOPMrootDomain | grep DeepIdle` shows `IOPMDeepIdleSupported = Yes`"
++          required: false
++        - label: "`pmset -g` shows `hibernatemode 0`, `standby 0`, `powernap 0`"
++          required: false
++  - type: input
++    id: machine
++    attributes:
++      label: Computer model
++      placeholder: HP EliteBook 840 G8
++    validations:
++      required: true
++  - type: input
++    id: cpu
++    attributes:
++      label: CPU and iGPU device ID
++      placeholder: i7-1185G7 (Tiger Lake), 8086:9A49
++    validations:
++      required: true
++  - type: input
++    id: macos
++    attributes:
++      label: macOS version and build
++      placeholder: 26.7.1 (25G241)
++    validations:
++      required: true
++  - type: input
++    id: version
++    attributes:
++      label: S0ixStandby version (Release or Debug)
++      placeholder: 0.5.4 Release
++    validations:
++      required: true
++  - type: input
++    id: graphics
++    attributes:
++      label: Graphics driver and version
++      placeholder: WhateverXe 0.8.0 + Graphics 0.4.0 / NootedGreen / none (-wex-noaccel)
++  - type: textarea
++    id: bootargs
++    attributes:
++      label: Boot-args
++      description: Output of `nvram boot-args`
++      render: text
++    validations:
++      required: true
++  - type: dropdown
++    id: kind
++    attributes:
++      label: What happens
++      options:
++        - Works (test report for a new machine)
++        - Doesn't enter sleep (LED steady, hang at sleep entry)
++        - Sleeps but doesn't wake (LED breathing, no reaction)
++        - Wakes, then black screen or no image
++        - Wakes, then freezes or panics
++        - Wakes on its own / too many dark wakes
++        - High power drain while asleep
++        - Other
++    validations:
++      required: true
++  - type: dropdown
++    id: power
++    attributes:
++      label: Power source when it happens
++      options:
++        - Battery
++        - AC, charging
++        - AC, battery full
++        - Both
++        - Not sure
++  - type: input
++    id: displays
++    attributes:
++      label: Displays connected
++      placeholder: internal only / internal + HDMI
++  - type: textarea
++    id: description
++    attributes:
++      label: Description and steps
++      description: What you did, what you expected, what happened, and how often (every time / 1 in N). Include the power LED state (steady or breathing).
++    validations:
++      required: true
++  - type: textarea
++    id: status
++    attributes:
++      label: s0ix-status.sh output
++      description: "`sudo ./macos/s0ix-status.sh` after a sleep and wake (or after the reboot if it hung)"
++      render: text
++    validations:
++      required: true
++  - type: textarea
++    id: pmset
++    attributes:
++      label: pmset log
++      description: "`pmset -g log | grep -E \"Entering Sleep|Wake from|DarkWake from|Failure\" | tail -20`"
++      render: text
++    validations:
++      required: true
++  - type: textarea
++    id: extra
++    attributes:
++      label: Anything else
++      description: Panic report, `macos/wake-report.sh` output, what you already tried (e.g. `-s0ixnodsm`, `-s0ixnogpureset`, `-s0ixoff`), ACPI notes.
+diff --git a/README.md b/README.md
+index 52435de..c1ecd85 100644
+--- a/README.md
++++ b/README.md
+@@ -32,7 +32,7 @@ HP EliteBook 840 G8 (Tiger Lake), macOS Tahoe 26.7.1, OpenCore 1.0.8.
+ | External HDMI across Deep Idle (WhateverXe, TGL-H35 report) | With an HDMI display connected, the wake shows an HPD flap storm on that DDI (`isHPDLow` toggling, `sinkCount = 0`) and the machine freezes a few seconds later. Without the cable, wake is clean, and plugging in afterwards works. Graphics-driver side ([#3](https://github.com/labrouss/S0ixStandby/issues/3)); unplug external displays before sleep |
+ | GPU hangs with hardware video (WhateverXe, TGL) | YouTube/Photo Booth decode hangs the GPU every ~10 s (`GPURestartSignaled`, CCS ring). Removing `AppleIntelTGLGraphicsVADriver.bundle` stops it (software decode, Metal stays). Not related to S0ixStandby |
+ | Wake by lid or keyboard (HP 840 G8) | Only the power button wakes from Deep Idle. macOS turns the EC's GPE off for sleep and the lid has no `_PRW`; arming the EC GPE (`-s0ixecwake`) latches the lid event but doesn't wake the CPU. `Last wake source` in `s0ix-status.sh` shows what woke each sleep |
+-| Rare dark display after wake | Seen twice, not reproducible with the same settings; please report with `macos/wake-report.sh` |
++| Rare dark display after wake | Seen twice, not reproducible with the same settings; please report with `macos/wake-report.sh` (use the issue form) |
+ | Wi-Fi after wake | AirportItlwm reconnects after every wake (it stops the firmware for sleep) |
+ 
+ ## How it works
+diff --git a/S0ixStandby/S0ixStandby.cpp b/S0ixStandby/S0ixStandby.cpp
+index 70b6d13..06d1c36 100644
+--- a/S0ixStandby/S0ixStandby.cpp
++++ b/S0ixStandby/S0ixStandby.cpp
+@@ -157,6 +157,25 @@ static const uint32_t kActionPriority = 0x8000;
+ 
+ static const uint32_t kSleepTypeDeepIdle = 7;   // kIOPMSleepTypeDeepIdle
+ static const uint16_t kPm1RtcEn = 1u << 10;      // PM1_EN.RTC_EN (ACPI fixed event)
++static const uint16_t kPm1PwrBtn = 1u << 8;       // PM1_STS.PWRBTN_STS / PM1_EN.PWRBTN_EN
++static uint8_t kbcArm(uint8_t &before, uint8_t &after);
++// ACPI EC (ECDT: data 0x62, command/status 0x66). Status: bit0 OBF, bit1 IBF, bit5 SCI_EVT.
++static bool ecWait(uint8_t mask, uint8_t want)
++{
++	for (int i = 0; i < 2000; i++) {                      // up to ~20 ms
++		if ((inb(0x66) & mask) == want) return true;
++		IODelay(10);
++	}
++	return false;
++}
++// PCH GPE0 registers: use aligned 32-bit I/O (byte writes to GPE0_EN did not stick on Alder/Raptor Lake PCH).
++static uint32_t gpeEnSet(uint16_t enBase, uint32_t gpe)
++{
++	uint16_t p = (uint16_t)(enBase + (gpe / 32) * 4);
++	uint32_t m = 1u << (gpe % 32), v = inl(p);
++	if (!(v & m)) outl(p, v | m);
++	return inl(p);
++}
+ static const uint8_t  kCmosAie  = 1u << 5;       // RTC register B: alarm interrupt enable
+ static inline uint8_t cmosRead(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
+ static inline void cmosWrite(uint8_t reg, uint8_t v) { outb(0x70, reg); outb(0x71, v); }
+@@ -203,6 +222,117 @@ static inline uint64_t rdtsc()
+ 	return ((uint64_t)hi << 32) | lo;
+ }
+ 
++// Per-CPU core residency, read on demand on every CPU (sysctl debug.s0ix.cores, read-only, no root):
++// per logical CPU 48 bytes {u32 valid, u32 core type (CPUID 0x1A eax[31:24]: 0x20 Atom, 0x40 Core), u64 TSC,
++// u64 MSR 0x3FC core C3, 0x3FD core C6, 0x3FE core C7, 0x664 Atom module C6} (~0 = read failed). Read it just before
++// and right after a Deep Idle sleep: the deltas show which CPUs stayed deep through the halt (offline CPUs that
++// take an interrupt in _xcpm_cpu_halt fall back to cli;hlt = C1 for the rest of the sleep).
++extern "C" int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);
++extern "C" void mp_rendezvous_no_intrs(void (*action_func)(void *), void *arg);
++extern "C" int cpu_number(void);
++#include <sys/sysctl.h>
++#include <sys/errno.h>
++static constexpr int kCoreSnapMax = 32;
++struct CoreSnap { uint32_t valid, type; uint64_t tsc, c3, c6, c7, mc6; };
++static CoreSnap gCoreSnap[kCoreSnapMax];
++static void coreSnapOne(void *)
++{
++	int cpu = cpu_number();
++	if (cpu < 0 || cpu >= kCoreSnapMax) return;
++	auto rd = [](uint32_t msr) -> uint64_t {
++		uint32_t lo = 0, hi = 0;
++		return rdmsr_carefully(msr, &lo, &hi) == 0 ? ((uint64_t)hi << 32 | lo) : ~0ULL;
++	};
++	uint32_t lo, hi, a, b, c, d;
++	asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
++	asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x1A), "c"(0));
++	gCoreSnap[cpu] = {1, a >> 24, (uint64_t)hi << 32 | lo, rd(0x3FC), rd(0x3FD), rd(0x3FE), rd(0x664)};
++}
++static IOLock *gCoreSnapLock;
++static int coreSnapHandler(struct sysctl_oid *, void *, int, struct sysctl_req *req)
++{
++	if (req->newptr) return EPERM;
++	if (!gCoreSnapLock) return ENOENT;
++	IOLockLock(gCoreSnapLock);
++	bzero(gCoreSnap, sizeof(gCoreSnap));
++	mp_rendezvous_no_intrs(coreSnapOne, nullptr);
++	int err = SYSCTL_OUT(req, gCoreSnap, sizeof(gCoreSnap));
++	IOLockUnlock(gCoreSnapLock);
++	return err;
++}
++// Live copy of the PMC MMIO page that holds the LPIT residency counter (0xFE001000 here = PMC offsets 0x1000-0x1FFF:
++// LTR_IGNORE 0x1B0C, LTR 0x1B50-0x1C0C, LPM status 0x1C34+, PPFEAR 0x1D90) - sysctl debug.s0ix.pmc, read-only.
++// Same layout as the "PMC page at halt" / "after halt" properties of -s0ixpmcdump, so awake vs halt compare 1:1.
++static volatile uint32_t *gPmcPage;
++static uint32_t gPmcCopy[1024];
++static int pmcPageHandler(struct sysctl_oid *, void *, int, struct sysctl_req *req)
++{
++	if (req->newptr) return EPERM;
++	if (!gCoreSnapLock || !gPmcPage) return ENOENT;
++	IOLockLock(gCoreSnapLock);
++	for (uint32_t i = 0; i < 1024; i++) gPmcCopy[i] = gPmcPage[i];
++	int err = SYSCTL_OUT(req, gPmcCopy, sizeof(gPmcCopy));
++	IOLockUnlock(gCoreSnapLock);
++	return err;
++}
++// Display engine registers (same ranges as macos/pmcdump PMCDump.cpp / gpu-wm.py: DBUF, WM_LINETIME, DC_STATE,
++// transcoder A/B timings, pipes A-D cursor/planes/watermarks/DDB, DMC DC5/DC6 counts). debug.s0ix.disp = live,
++// debug.s0ix.disphalt = read at the last Deep Idle quiesce action (just before the halt), as u32 values in range order.
++struct DispRange { uint32_t from, to; };
++static constexpr DispRange kDispRanges[] = {
++	{0x44FE0, 0x45040}, {0x45270, 0x45280}, {0x45500, 0x45530}, {0x60000, 0x60080}, {0x61000, 0x61080},
++	{0x70000, 0x70600}, {0x71000, 0x71600}, {0x72000, 0x72600}, {0x73000, 0x73600}, {0x101080, 0x101090},
++};
++static constexpr uint32_t dispRegCount() { uint32_t n = 0; for (auto &r : kDispRanges) n += (r.to - r.from) / 4; return n; }
++static volatile uint8_t *gDispMMIO;      // set while the GPU BAR is mapped and in D0 with memory decode (checked at sleep)
++static bool gDispOk;                     // onSleep: GPU in D0 with memory decode -> the quiesce read is safe
++static uint32_t gDispHalt[dispRegCount()], gDispLive[dispRegCount()];
++static bool gDispHaltValid;
++// GT RC6 around the halt (Dell G15 / WhateverXe #80: package stuck shallow while the GT was kept out of RC6):
++// GEN6_GT_GFX_RC6 0x138108 (residency, 1.28 us units, no forcewake needed), GEN6_RC_STATE 0x138104.
++static uint32_t gRc6Halt, gRc6Active, gRcStateHalt, gRcStateActive;
++static uint64_t gRc6TscHalt, gRc6TscActive;
++static bool gRc6Valid;
++static void dispRead(uint32_t *out)
++{
++	uint32_t n = 0;
++	for (auto &r : kDispRanges)
++		for (uint32_t o = r.from; o < r.to; o += 4) out[n++] = *reinterpret_cast<volatile uint32_t *>(gDispMMIO + o);
++}
++static int dispHandler(struct sysctl_oid *, void *arg1, int, struct sysctl_req *req)
++{
++	if (req->newptr) return EPERM;
++	if (!gCoreSnapLock) return ENOENT;
++	if (arg1) {   // halt copy
++		if (!gDispHaltValid) return ENOENT;
++		return SYSCTL_OUT(req, gDispHalt, sizeof(gDispHalt));
++	}
++	if (!gDispMMIO) return ENOENT;
++	IOLockLock(gCoreSnapLock);
++	dispRead(gDispLive);
++	int err = SYSCTL_OUT(req, gDispLive, sizeof(gDispLive));
++	IOLockUnlock(gCoreSnapLock);
++	return err;
++}
++// NVMe handling for the next Deep Idle, switchable at runtime: sudo sysctl debug.s0ix.nvme=<v>
++//   v & 0xF: 0 = macOS default (drives in D3), 1 = D0 with the controller left shut down, 2 = D0 + live controller in
++//   its deepest PS (I/O queue pair); 0x10 = mask MSI-X (function mask) during the halt (mode 2);
++//   0x100 / 0x200 = live PS only for the drive on bus 4 / bus 5 (the other stays D0 shut down; neither = both).
++//   Default from -s0ixnvmed0 / -s0ixnvmeps.
++static int gNvmeCtl = 0;
++SYSCTL_DECL(_debug);
++SYSCTL_NODE(_debug, OID_AUTO, s0ix, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "S0ixStandby");
++SYSCTL_PROC(_debug_s0ix, OID_AUTO, cores, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
++            coreSnapHandler, "S", "per-CPU TSC + core C3/C6/C7 + Atom module C6 residency");
++SYSCTL_PROC(_debug_s0ix, OID_AUTO, pmc, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
++            pmcPageHandler, "S", "live PMC page (the LPIT counter's 4 KB MMIO page)");
++SYSCTL_INT(_debug_s0ix, OID_AUTO, nvme, CTLFLAG_RW | CTLFLAG_LOCKED, &gNvmeCtl, 0,
++           "NVMe Deep Idle mode: 0 D3 (macOS), 1 D0 shut down, 2 D0 live PS; +0x10 MSI-X masked; +0x100 bus 4 / +0x200 bus 5 only");
++SYSCTL_PROC(_debug_s0ix, OID_AUTO, disp, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
++            dispHandler, "S", "live display registers");
++SYSCTL_PROC(_debug_s0ix, OID_AUTO, disphalt, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, (void *)1, 0,
++            dispHandler, "S", "display registers at the last Deep Idle quiesce");
++
+ // C-state residency MSRs (Intel SDM vol. 4). All count at TSC rate.
+ struct CState { const char *name; uint32_t msr; };
+ static const CState kCStates[] = {
+@@ -308,6 +438,19 @@ bool S0ixStandby::start(IOService *provider)
+ 	refclkWA = bootArg("-s0ixrefclk");
+ 	acNoRtc = bootArg("-s0ixacnortc");
+ 	ecWake = bootArg("-s0ixecwake");
++	pbWake = bootArg("-s0ixpwrbtn");
++	lwWake = bootArg("-s0ixlidwake");
++	kbWake = bootArg("-s0ixkbdwake");
++	edWake = bootArg("-s0ixecdrain");
++	ecLog = bootArg("-s0ixeclog");
++	acNoEc = bootArg("-s0ixacnoec");
++	iomNoDpof = bootArg("-s0ixnodpof");
++	tcssD3 = bootArg("-s0ixtcssd3");
++	lwPad = bootArg("-s0ixlidpad");
++	nvmeD0 = bootArg("-s0ixnvmed0");
++	nvmePs = nvmeD0 && bootArg("-s0ixnvmeps");
++	gNvmeCtl = nvmePs ? 2 : nvmeD0 ? 1 : 0;
++	{ uint32_t m = 0; if (PE_parse_boot_argn("s0ixnobm", &m, sizeof(m))) nobmMask = m; }
+ 	uint32_t fn = 0;
+ 	if (PE_parse_boot_argn("s0ixfn", &fn, sizeof(fn)))
+ 		fnAllow = fn;
+@@ -396,8 +539,10 @@ bool S0ixStandby::start(IOService *provider)
+ 		setProperty("Wi-Fi PCI PM", "pending (set up 30 s after boot)");
+ 	}
+ 
+-	if (acNoRtc) {
+-		if (setupRtcBlock() && workLoop) {
++	if (acNoRtc || acNoEc) {
++		// the AC timer also drives -s0ixacnoec (it was only created for -s0ixacnortc: acnoec never ran)
++		if ((acNoEc || setupRtcBlock()) && workLoop) {
++			if (acNoRtc && acNoEc) setupRtcBlock();
+ 			acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
+ 			if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
+ 				OSSafeReleaseNULL(acTimer);
+@@ -408,6 +553,8 @@ bool S0ixStandby::start(IOService *provider)
+ 	}
+ 
+ 	setupWakeInfo();
++	setupLidWake();
++	setupIom();
+ 
+ 	if (workLoop) {
+ 		battTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::battTimerFired);
+@@ -454,12 +601,32 @@ bool S0ixStandby::start(IOService *provider)
+ 	LOG("started on %s (Intel 0x%x, Microsoft 0x%x, AMD 0x%x, dsm %s)",
+ 	    lps0->getName(), dsmMask[kIntel], dsmMask[kMicrosoft], dsmMask[kAMD],
+ 	    dsmEnabled ? "on" : "off");
++	if (!gCoreSnapLock) gCoreSnapLock = IOLockAlloc();
++	if (gCoreSnapLock) {
++		sysctl_register_oid(&sysctl__debug_s0ix);
++		sysctl_register_oid(&sysctl__debug_s0ix_cores);
++		sysctl_register_oid(&sysctl__debug_s0ix_pmc);
++		sysctl_register_oid(&sysctl__debug_s0ix_nvme);
++		sysctl_register_oid(&sysctl__debug_s0ix_disp);
++		sysctl_register_oid(&sysctl__debug_s0ix_disphalt);
++		gPmcPage = counterPage;
++	}
+ 	publishLog();
+ 	return true;
+ }
+ 
+ void S0ixStandby::stop(IOService *provider)
+ {
++	if (gCoreSnapLock) {
++		gPmcPage = nullptr;
++		gDispMMIO = nullptr;
++		sysctl_unregister_oid(&sysctl__debug_s0ix_disphalt);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_disp);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_nvme);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_pmc);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_cores);
++		sysctl_unregister_oid(&sysctl__debug_s0ix);
++	}
+ 	if (publishTimer) {
+ 		publishTimer->cancelTimeout();
+ 		if (workLoop) workLoop->removeEventSource(publishTimer);
+@@ -1008,15 +1175,79 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+ 		// Interrupts are disabled in these two: MSR reads only, no locks/logging.
+ 		if (functionName->isEqualTo("IOPlatformQuiesceAction")) {
+ 			if (rtcBlocked) outw(pm1EnPort, (uint16_t)(inw(pm1EnPort) & ~kPm1RtcEn));
++			if (kbArm) kbArmResult = kbcArm(kbCfgBefore, kbCfgSet);
++			kbRteUnmasked = false;
++			if (kbArm && kbArmResult == 1 && ioapic) {
++				ioapic[0] = 0x12; kbRteLow = ioapic[4];            // redirection entry for GSI 1 (IRQ1), low dword
++				ioapic[0] = 0x13; kbRteHigh = ioapic[4];
++				if (kbRteLow & 0x10000) {                          // masked by the PS/2 driver for sleep
++					ioapic[0] = 0x12; ioapic[4] = kbRteLow & ~0x10000u;
++					kbRteUnmasked = true;
++				}
++			}
++			if (lwArm && lwGpe != 0xFFFFFFFF) lwEnReadback = gpeEnSet(gpe0EnPort, lwGpe);
++			lwGpioArmed = false;
++			lwPadArmed = 0;
++			if (lwArm && lwGpeEn && lwPadCfg) {
++				lwPadSaved = *lwPadCfg;
++				// RX on (clear bit 9), GPIROUTSCI (bit 19), RXEVCFG both edges (26:25 = 11); TX stays disabled
++				*lwPadCfg = (lwPadSaved & ~((1u << 9) | (3u << 25))) | (1u << 19) | (3u << 25);
++				lwPadHalt = *lwPadCfg;
++				lwPadArmed = 1;
++			}
++			if (lwArm && lwGpeEn) {
++				lwGpeEnSaved = *lwGpeEn;
++				*lwGpeSts = lwGpioBit;                             // clear a stale status (write 1)
++				*lwGpeEn = lwGpeEnSaved | lwGpioBit;
++				lwEnReadback = *lwGpeEn;
++				lwGpioArmed = true;
++			}
++			if (pbArm) {
++				// The laptop reports its power button through the EC (FADT control-method button), so the OS
++				// never enables the PCH's fixed PWRBTN event; the EC is in standby and does not deliver the
++				// press. The PCH still latches PWRBTN_STS: enable it for the halt only.
++				outw(pm1StsPort, kPm1PwrBtn);                               // drop a stale press (write 1 to clear)
++				outw(pbEnPort, (uint16_t)(inw(pbEnPort) | kPm1PwrBtn));
++				pbArmed = true;
++			}
++			if (edWake && lastSleepType == kSleepTypeDeepIdle) {
++				ecStsAtHalt = inb(0x66);
++				edGpeStsAtHalt = (gpe0StsPort && ecGpe != 0xFFFFFFFF) ? ((inl((uint16_t)(gpe0StsPort + (ecGpe / 32) * 4)) >> (ecGpe % 32)) & 1) : false;
++				edN = 0;
++				for (int i = 0; i < 8 && (inb(0x66) & 0x20); i++) {   // SCI_EVT: a query is pending
++					if (!ecWait(0x02, 0)) break;
++					outb(0x66, 0x84);                                      // QR_EC
++					if (!ecWait(0x01, 0x01)) break;
++					uint8_t q = inb(0x62);
++					if (q && edN < sizeof(edQ)) edQ[edN++] = q;
++				}
++				if (gpe0StsPort && ecGpe != 0xFFFFFFFF)                // clear the EC GPE status so a new SCI edge can wake us
++					outl((uint16_t)(gpe0StsPort + (ecGpe / 32) * 4), 1u << (ecGpe % 32));
++				pm1CntAtHalt = pm1CntPort ? inw(pm1CntPort) : 0;
++				sciUnmasked = false;
++				if (ioapic) {                                          // SCI = GSI 9 (MADT override: level, active high)
++					ioapic[0] = 0x22; sciRteLow = ioapic[4];
++					ioapic[0] = 0x23; sciRteHigh = ioapic[4];
++					if (sciRteLow & 0x10000) { ioapic[0] = 0x22; ioapic[4] = sciRteLow & ~0x10000u; sciUnmasked = true; }
++				}
++			}
+ 			if (ecArm) {
+ 				// Last thing before the halt: macOS has set up its wake GPEs.
+-				uint16_t p = (uint16_t)(gpe0EnPort + ecGpe / 8);
+-				uint8_t m = (uint8_t)(1u << (ecGpe % 8)), v = inb(p);
+-				ecEnAtHalt = (v & m) ? 1 : 0;
+-				if (!(v & m)) { outb(p, (uint8_t)(v | m)); ecArmed = true; }
++				uint16_t p = (uint16_t)(gpe0EnPort + (ecGpe / 32) * 4);
++				uint32_t v = inl(p);
++				ecEnAtHalt = (v >> (ecGpe % 32)) & 1;
++				ecEnReadback = gpeEnSet(gpe0EnPort, ecGpe);
++				if (!ecEnAtHalt) ecArmed = true;
+ 			} else if (gpe0EnPort && ecGpe != 0xFFFFFFFF) {
+ 				ecEnAtHalt = (inb((uint16_t)(gpe0EnPort + ecGpe / 8)) >> (ecGpe % 8)) & 1;
+ 			}
++			if (gpe0EnPort)
++				for (uint32_t i = 0; i + 4 <= gpe0Half && i + 4 <= sizeof(gpe0EnAtHalt); i += 4) {
++					uint32_t d = inl((uint16_t)(gpe0EnPort + i));
++					for (uint32_t b = 0; b < 4; b++) gpe0EnAtHalt[i + b] = (uint8_t)(d >> (8 * b));
++				}
++			if (gDispOk && gDispMMIO) { dispRead(gDispHalt); gDispHaltValid = true; }
++			if (gDispOk && gDispMMIO) { gRc6Halt = *reinterpret_cast<volatile uint32_t *>(gDispMMIO + 0x138108); gRcStateHalt = *reinterpret_cast<volatile uint32_t *>(gDispMMIO + 0x138104); gRc6TscHalt = rdtsc(); gRc6Valid = false; }
+ 			if (cstateMask) { readHalt(haltAtQuiesce); tscAtQuiesce = rdtsc(); haltValid = false; }
+ 			if (pmcDump && counterPage) {
+ 				for (uint32_t i = 0; i < 1024; i++) pmcAtHalt[i] = counterPage[i];
+@@ -1035,14 +1266,61 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+ 			if (gpe0StsPort) {
+ 				// What woke the CPU: status bits are still set here (cleared later by ACPI).
+ 				pm1StsAtWake = pm1StsPort ? inw(pm1StsPort) : 0;
++				if (edWake) {
++					ecStsAtWakeP = inb(0x66);
++					ecEnAtWake = (gpe0EnPort && ecGpe != 0xFFFFFFFF) ? inl((uint16_t)(gpe0EnPort + (ecGpe / 32) * 4)) : 0;
++					if (sciUnmasked && ioapic) { ioapic[0] = 0x22; ioapic[4] = sciRteLow; sciUnmasked = false; }
++				}
++				if (pbArmed) {
++					outw(pbEnPort, (uint16_t)(inw(pbEnPort) & ~kPm1PwrBtn));   // never leave it on: nobody handles it awake
++					if (pm1StsAtWake & kPm1PwrBtn) { outw(pm1StsPort, kPm1PwrBtn); pbWoke = true; }
++					pbArmed = false;
++				}
+ 				for (uint32_t i = 0; i < gpe0Half && i < sizeof(gpe0StsAtWake); i++)
+ 					gpe0StsAtWake[i] = inb((uint16_t)(gpe0StsPort + i));
+ 				wakeInfoValid = true;
++				if (ecLog && ecGpe != 0xFFFFFFFF && lastSleepType == kSleepTypeDeepIdle) {
++					elEc = (gpe0StsAtWake[ecGpe / 8] >> (ecGpe % 8)) & 1;
++					elPm1 = pm1StsAtWake;
++					elSci = inb(0x66);
++					elN = 0;
++					for (int i = 0; i < 8 && (inb(0x66) & 0x20); i++) {     // SCI_EVT: drain the queries behind this wake
++						if (!ecWait(0x02, 0)) break;
++						outb(0x66, 0x84);                                        // QR_EC
++						if (!ecWait(0x01, 0x01)) break;
++						uint8_t q = inb(0x62);
++						if (q && elN < sizeof(elQ)) elQ[elN++] = q;
++					}
++					elPending = true;
++				}
++				if (lwArm && lwGpe != 0xFFFFFFFF && (gpe0StsAtWake[lwGpe / 8] >> (lwGpe % 8) & 1)) lwWoke = true;
++				if (lwGpioArmed) {
++					lwGpeStsAtWake = *lwGpeSts;
++					if (lwGpeStsAtWake & lwGpioBit) lwWoke = true;
++					*lwGpeEn = lwGpeEnSaved;                          // restore; ACPI clears the status when it handles _L17
++					lwGpioArmed = false;
++				}
++				if (lwPadArmed) {
++					lwPadWake = *lwPadCfg;                            // bit 1 = pin state (RX) right after the wake
++					*lwPadCfg = lwPadSaved;
++					lwPadArmed = 2;
++				}
++				if (kbArm) {
++					kbStsAtWake = inb(0x64);
++					if (kbRteUnmasked && ioapic) { ioapic[0] = 0x12; ioapic[4] = kbRteLow; kbRteUnmasked = false; }
++					if (kbArmResult == 1 && (kbStsAtWake & 0x21) == 0x01) kbWoke = true;   // keyboard byte waiting
++				}
+ 			}
+ 			if (pmcDump && counterPage && pmcHaltValid) {
+ 				for (uint32_t i = 0; i < 1024; i++) pmcAtActive[i] = counterPage[i];
+ 				pmcActiveValid = true;
+ 			}
++			if (gDispMMIO && gRc6TscHalt) {
++				gRc6Active = *reinterpret_cast<volatile uint32_t *>(gDispMMIO + 0x138108);
++				gRcStateActive = *reinterpret_cast<volatile uint32_t *>(gDispMMIO + 0x138104);
++				gRc6TscActive = rdtsc();
++				gRc6Valid = true;
++			}
+ 			return kIOReturnSuccess;
+ 		}
+ 	}
+@@ -1117,6 +1395,21 @@ void S0ixStandby::setupWakeInfo()
+ 	if (len >= 232 && f[220] == 1 && OSReadLittleInt64(f, 224))   // X_GPE0_BLK, SystemIO
+ 		gpe = OSReadLittleInt64(f, 224);
+ 	if (pm1 && pm1 < 0xFFFF) pm1StsPort = (uint16_t)pm1;
++	{ uint32_t cnt = OSReadLittleInt32(f, 64); if (cnt && cnt < 0xFFFF) pm1CntPort = (uint16_t)cnt; }   // PM1a_CNT_BLK
++	{
++		uint8_t evtLen = f[88];                                   // PM1_EVT_LEN
++		if (pm1StsPort && evtLen >= 4 && pm1 + evtLen / 2 < 0xFFFF) pbEnPort = (uint16_t)(pm1 + evtLen / 2);
++		char pb[96];
++		if (!pbWake) snprintf(pb, sizeof(pb), "off (boot-arg -s0ixpwrbtn)");
++		else if (pbEnPort) snprintf(pb, sizeof(pb), "armed during Deep Idle (-s0ixpwrbtn): PM1_EN at I/O 0x%x bit 8", pbEnPort);
++		else snprintf(pb, sizeof(pb), "unavailable: no PM1 event block");
++		setProperty("Power button wake", pb);
++		LOG("Power button wake %s", pb);
++		if (pbWake && pbEnPort && !pbCall) pbCall = thread_call_allocate(pbUserActive, this);
++		if (edWake && !edCall) edCall = thread_call_allocate(edReplay, this);
++		if (ecLog && !elCall) elCall = thread_call_allocate(elReplay, this);
++		setProperty("EC drain", edWake ? "on (-s0ixecdrain)" : "off (boot-arg -s0ixecdrain)");
++	}
+ 	if (gpe && gpe + gpeLen <= 0xFFFF && gpeLen >= 2 && !(gpeLen & 1)) {
+ 		gpe0StsPort = (uint16_t)gpe;
+ 		gpe0Half = gpeLen / 2;
+@@ -1131,6 +1424,663 @@ void S0ixStandby::setupWakeInfo()
+ // The EC's GPE number: s0ixecgpe=N overrides; otherwise _GPE of the PNP0C09
+ // device, searched in the ACPI plane (the EC nub isn't always registered yet,
+ // or at all). An integer is a GPE0 bit; a package means a GPE block device.
++// i8042 at the quiesce action (interrupts off, the PS/2 driver has already put the controller to sleep with the
++// keyboard clock and IRQ disabled): turn the keyboard interface and its interrupt back on so a key press raises
++// IRQ1 and ends the halt. The PS/2 driver re-initialises the controller on wake.
++static bool kbcWait(uint8_t mask, uint8_t want)
++{
++	for (int i = 0; i < 2000; i++) {                      // up to ~20 ms
++		if ((inb(0x64) & mask) == want) return true;
++		IODelay(10);
++	}
++	return false;
++}
++static uint8_t kbcArm(uint8_t &before, uint8_t &after)
++{
++	if (inb(0x64) == 0xFF) return 2;                      // no controller
++	if (!kbcWait(0x02, 0)) return 3;
++	outb(0x64, 0xAE);                                     // enable the keyboard interface
++	for (int i = 0; i < 16 && (inb(0x64) & 0x01); i++) { (void)inb(0x60); IODelay(50); }   // drop stale bytes
++	if (!kbcWait(0x02, 0)) return 3;
++	outb(0x64, 0x20);                                     // read the command byte
++	if (!kbcWait(0x01, 0x01)) return 4;
++	before = inb(0x60);
++	after = (uint8_t)((before | 0x01) & ~0x10);           // keyboard IRQ on, keyboard clock not disabled
++	if (!kbcWait(0x02, 0)) return 3;
++	outb(0x64, 0x60);
++	if (!kbcWait(0x02, 0)) return 3;
++	outb(0x60, after);
++	return 1;
++}
++
++// Lid (PNP0C0D) and sleep button (PNP0C0E): on ThinkPads their _PSW sets the EC's wake-on-lid-open / wake-on-Fn bits
++// and _PRW names the EC's wake GPE. macOS does not do this for Deep Idle, so the lid never wakes the machine.
++void S0ixStandby::publishTypeC()
++{
++	static const uint8_t devs[][2] = { {0x0d, 0}, {0x0d, 2}, {0x0d, 3}, {0x07, 0}, {0x07, 1}, {0x07, 2}, {0x07, 3} };
++	char pci[200]; size_t n = 0;
++	char ports[400]; size_t pn = 0;
++	ports[0] = 0;
++	OSDictionary *match = serviceMatching("IOPCIDevice");
++	OSIterator *it = match ? getMatchingServices(match) : nullptr;
++	OSSafeReleaseNULL(match);
++	if (!it) return;
++	while (OSObject *o = it->getNextObject()) {
++		IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
++		if (!d || d->getBusNumber() != 0) continue;
++		for (auto &w : devs) {
++			if (d->getDeviceNumber() != w[0] || d->getFunctionNumber() != w[1]) continue;
++			uint8_t pm = 0;
++			uint32_t ps = 0xFF;
++			if (d->findPCICapability(kIOPCIPowerManagementCapability, &pm) && pm) ps = d->configRead16(pm + 4) & 3;
++			n += snprintf(pci + n, sizeof(pci) - n, "%s%x.%x D%u", n ? ", " : "", w[0], w[1], ps);
++			if (w[0] == 0x0d && w[1] == 0) {
++				if (!txhcDev) { d->retain(); txhcDev = d; txhcPm = pm; }
++				if (!txhcMap) txhcMap = d->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache);
++				if (txhcMap && ps == 0) {
++					volatile uint8_t *b = reinterpret_cast<volatile uint8_t *>(txhcMap->getVirtualAddress());
++					uint32_t capLen = b[0], maxPorts = (*reinterpret_cast<volatile uint32_t *>(b + 4)) >> 24;
++					for (uint32_t p = 0; p < maxPorts && p < 16; p++) {
++						uint32_t sc = *reinterpret_cast<volatile uint32_t *>(b + capLen + 0x400 + 0x10 * p);
++						// CCS b0, PED b1, PR b4, PLS b8:5, PP b9, speed b13:10
++						pn += snprintf(ports + pn, sizeof(ports) - pn, "%sP%u %08x(ccs%u ped%u pls%u pp%u spd%u)", pn ? " " : "",
++						               p + 1, sc, sc & 1, (sc >> 1) & 1, (sc >> 5) & 0xF, (sc >> 9) & 1, (sc >> 10) & 0xF);
++					}
++				} else if (ps != 0) {
++					snprintf(ports, sizeof(ports), "controller not in D0");
++				}
++			}
++		}
++	}
++	it->release();
++	setProperty("Type-C PCI", pci);
++	setProperty("TXHC PORTSC", ports);
++	// MSR_SMI_COUNT (0x34): SMIs since reset - hidden firmware (SMM) time shows up as core power at OS idle.
++	uint64_t smi = rdmsr(0x34) & 0xffffffffULL, tsc = rdtsc();
++	char sb[96];
++	if (smiTscLast && tsc > smiTscLast) {
++		uint64_t dsmi = smi - smiLast;
++		snprintf(sb, sizeof(sb), "%llu total, +%llu since last sample (%llu M TSC ticks)", (unsigned long long)smi,
++		         (unsigned long long)dsmi, (unsigned long long)((tsc - smiTscLast) / 1000000ULL));
++	} else {
++		snprintf(sb, sizeof(sb), "%llu total", (unsigned long long)smi);
++	}
++	smiLast = smi; smiTscLast = tsc;
++	setProperty("SMI count", sb);
++}
++
++void S0ixStandby::setupIom()
++{
++	char buf[128] = "not found";
++	const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
++	OSString *nm = OSString::withCString("PC00");
++	IOACPIPlatformDevice *pc = nullptr;
++	if (plane && nm)
++		if (IORegistryIterator *it = IORegistryIterator::iterateOver(plane, kIORegistryIterateRecursively)) {
++			while (IORegistryEntry *e = it->getNextObject()) {
++				IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, e);
++				if (d && nm->isEqualTo(d->getName())) { pc = d; break; }
++			}
++			it->release();
++		}
++	OSSafeReleaseNULL(nm);
++	OSObject *r = nullptr;
++	uint64_t base = 0;
++	if (pc && !pc00) { pc->retain(); pc00 = pc; }
++	if (pc && pc->evaluateObject("IOMA", &r) == kIOReturnSuccess && r)
++		if (OSNumber *n = OSDynamicCast(OSNumber, r)) base = n->unsigned64BitValue();
++	OSSafeReleaseNULL(r);
++	if (base) {
++		uint64_t a = base + 0xC10000 + 0x40;
++		if (IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(a & ~0xFFFULL, 0x1000, kIODirectionInOut)) {
++			iomMap = md->map(kIOMapInhibitCache);
++			md->release();
++			if (iomMap) iomReg = reinterpret_cast<volatile uint32_t *>(iomMap->getVirtualAddress() + (a & 0xFFF));
++		}
++		snprintf(buf, sizeof(buf), "IOM+0x40 at 0x%llx = 0x%08x (TD3C b15, TACK b16, DPOF b17)%s", (unsigned long long)a,
++		         iomReg ? *iomReg : 0xFFFFFFFF, iomNoDpof ? "; -s0ixnodpof: DPOF cleared after the entry _DSM" : "");
++	}
++	setProperty("Type-C IOM", buf);
++	LOG("Type-C IOM %s", buf);
++	if (iomReg && !iomCall) iomCall = thread_call_allocate(iomLater, this);
++}
++
++void S0ixStandby::iomLater(thread_call_param_t self, thread_call_param_t)
++{
++	S0ixStandby *me = static_cast<S0ixStandby *>(self);
++	if (!me->iomReg) return;
++	me->iomV[4] = *me->iomReg;
++	char b[160];
++	snprintf(b, sizeof(b), "before entry 0x%08x, after entry 0x%08x, wake before exit 0x%08x, after exit 0x%08x, +2 s 0x%08x",
++	         me->iomV[0], me->iomV[1], me->iomV[2], me->iomV[3], me->iomV[4]);
++	me->setProperty("Type-C IOM at last sleep", b);
++	if (gRc6Valid) {
++		char g[200];
++		snprintf(g, sizeof(g), "RC6 counter %u -> %u (+%u x 1.28 us), TSC +%llu, RC_STATE 0x%08x -> 0x%08x",
++		         gRc6Halt, gRc6Active, gRc6Active - gRc6Halt, (unsigned long long)(gRc6TscActive - gRc6TscHalt),
++		         gRcStateHalt, gRcStateActive);
++		me->setProperty("GT RC6 at last halt", g);
++		gRc6Valid = false; gRc6TscHalt = 0;
++	}
++	if (me->nvN) {
++		char t[300]; size_t n = 0;
++		n += snprintf(t + n, sizeof(t) - n, "mode 0x%x (%s), %u sleeps:", me->nvMode, (me->nvMode & 0xF) == 2 ? "D0 live PS" : (me->nvMode & 0xF) == 1 ? "D0 shut down" : "macOS D3", me->nvCount);
++		for (uint32_t i = 0; i < me->nvN && n < sizeof(t) - 40; i++)
++			n += snprintf(t + n, sizeof(t) - n, " %02x:%02x.%x D%u%s", me->nvDev[i]->getBusNumber(), me->nvDev[i]->getDeviceNumber(),
++			              me->nvDev[i]->getFunctionNumber(), me->nvSaved[i] & 3, me->nvChanged[i] ? (me->nvAfter[i] & 3) == 0 ? "->D0" : "->D0 FAILED" : "");
++		me->setProperty("NVMe at last sleep", t);
++		char l[600]; size_t m = 0;
++		for (uint32_t i = 0; i < me->nvN && m < sizeof(l) - 120; i++)
++			m += snprintf(l + m, sizeof(l) - m, "%s%02x:%02x.%x lnkctl %x/%x/%x devctl2 %x/%x/%x l1ss %x/%x/%x ltr %x/%x/%x", m ? "; " : "",
++			              me->nvDev[i]->getBusNumber(), me->nvDev[i]->getDeviceNumber(), me->nvDev[i]->getFunctionNumber(),
++			              me->nvLnk[i][0], me->nvLnk[i][1], me->nvLnk[i][2], me->nvDc2[i][0], me->nvDc2[i][1], me->nvDc2[i][2],
++			              me->nvSs1[i][0], me->nvSs1[i][1], me->nvSs1[i][2], me->nvLtrV[i][0], me->nvLtrV[i][1], me->nvLtrV[i][2]);
++		me->setProperty("NVMe link config (saved/after D0/restored)", l);
++		if ((me->nvMode & 0xF) == 2) {
++			char q[400]; size_t k = 0;
++			for (uint32_t i = 0; i < me->nvN && k < sizeof(q) - 100; i++)
++				if (me->nvPsInfo[i][0]) k += snprintf(q + k, sizeof(q) - k, "%s%02x:00.0 %s", k ? "; " : "", me->nvDev[i]->getBusNumber(), me->nvPsInfo[i]);
++			me->setProperty("NVMe power state at last sleep", k ? q : "not attempted");
++		}
++	}
++	if (me->nobmMask) {
++		char t[200];
++		snprintf(t, sizeof(t), "mask 0x%x: %u of %u devices had bus mastering cleared at the last sleep, %u sleeps",
++		         me->nobmMask, me->nobmDone, me->nobmN, me->nobmCount);
++		me->setProperty("Bus master off at last sleep", t);
++	}
++	if (me->tcssD3) {
++		char t[260];
++		snprintf(t, sizeof(t), "%u sleeps; xHCI 0d.0 PMCSR at sleep 0x%04x (restored to 0x%04x); TCOF 0x%x%s: IOM 0x%08x -> 0x%08x "
++		         "(TACK after %u ms); wake: IOM 0x%08x, TCON 0x%x -> 0x%08x", me->tcssCount, me->txhcPmcsrSleep,
++		         me->txhcPmcsrSaved, me->tcssRet[0], me->tcssDirect ? " (direct TD3C write)" : "", me->tcssIom[0], me->tcssIom[1], me->tcssAckMs, me->tcssIom[2],
++		         me->tcssRet[1], me->tcssIom[3]);
++		me->setProperty("Type-C D3cold at last sleep", t);
++	}
++	me->publishTypeC();
++}
++
++// TCSS D3cold (-s0ixtcssd3). The DSDT's TCSS xHCI (TXHC) has _PR0/_PR3 = \_SB.PC00.D3C; its _OFF (TCOF) sets the IOM's
++// TD3C bit when no TCSS device asks to skip D3cold, _ON (TCON) clears it and waits for TACK. macOS never does ACPI
++// runtime D3 for these devices, so TD3C stayed 0 in every Deep Idle and the package never left PC2 once the IOM was
++// told the display is off (DPOF or DC9). Only with nothing attached to USB-C (never sleep docked).
++// Called from the 60 s timer (normal thread context, system awake): find the devices and, for -s0ixnvmeps, allocate the
++// admin-queue DMA buffers and map BAR0 now - not in the sleep action.
++void S0ixStandby::nvmePrep()
++{
++	if (!nvN) {   // root ports 00:06.x first (parents), then the NVMe endpoints (class 01:08:02)
++		OSDictionary *match = serviceMatching("IOPCIDevice");
++		OSIterator *it = match ? getMatchingServices(match) : nullptr;
++		OSSafeReleaseNULL(match);
++		if (!it) return;
++		IOPCIDevice *rp[kNvMax] {}, *ep[kNvMax] {};
++		uint32_t nr = 0, ne = 0;
++		while (OSObject *o = it->getNextObject()) {
++			IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
++			if (!d) continue;
++			if (d->getBusNumber() == 0 && d->getDeviceNumber() == 6 && nr < 2) rp[nr++] = d;
++			else if ((d->configRead32(kIOPCIConfigRevisionID) >> 8) == 0x010802 && ne < 2) ep[ne++] = d;
++		}
++		it->release();
++		for (uint32_t i = 0; i < nr; i++) { rp[i]->retain(); nvDev[nvN++] = rp[i]; }
++		for (uint32_t i = 0; i < ne; i++) { ep[i]->retain(); nvDev[nvN++] = ep[i]; }
++		for (uint32_t i = 0; i < nvN; i++) {
++			uint8_t pm = 0, ex = 0; IOByteCount o = 0;
++			nvDev[i]->findPCICapability(kIOPCIPowerManagementCapability, &pm); nvPm[i] = pm;
++			nvDev[i]->findPCICapability(kIOPCIPCIExpressCapability, &ex); nvExp[i] = ex;
++			o = 0; if (nvDev[i]->extendedFindPCICapability(kIOPCIExpressCapabilityIDL1PMSubstates, &o)) nvL1ss[i] = (uint16_t)o;
++			o = 0; if (nvDev[i]->extendedFindPCICapability(kIOPCIExpressCapabilityIDLatencyTolerenceReporting, &o)) nvLtr[i] = (uint16_t)o;
++		}
++	}
++	if (!prepAlloc) return;
++	for (uint32_t i = 0; i < nvN; i++) {
++		if ((nvDev[i]->configRead32(kIOPCIConfigRevisionID) >> 8) != 0x010802) continue;
++		if (!nvBuf[i]) {
++			nvBuf[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous,
++			                                                           5 * 4096, 0x00000000FFFFF000ULL);
++			if (nvBuf[i] && nvBuf[i]->prepare() != kIOReturnSuccess) OSSafeReleaseNULL(nvBuf[i]);
++		}
++		if (!nvBar[i] && nvDev[i]->configRead16(nvPm[i] + 4) != 0xFFFF && !(nvDev[i]->configRead16(nvPm[i] + 4) & 3))
++			nvBar[i] = nvDev[i]->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache);
++		if ((gNvmeCtl & 0x60) && nvHmbN[i] < kHmbChunks) {
++			for (uint32_t c = nvHmbN[i]; c < kHmbChunks; c++) {
++				IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++					kIODirectionInOut | kIOMemoryPhysicallyContiguous, kHmbChunkBytes, 0x0000FFFFFFFFF000ULL);
++				if (!b || b->prepare() != kIOReturnSuccess) { OSSafeReleaseNULL(b); break; }
++				nvHmb[i][c] = b; nvHmbN[i] = c + 1;
++			}
++		}
++	}
++}
++
++void S0ixStandby::nvmeSleep()
++{
++	if (!nvN) { prepAlloc = false; nvmePrep(); prepAlloc = true; }   // lookup only: no allocation here
++	nvMode = (uint32_t)gNvmeCtl;
++	for (uint32_t i = 0; i < nvN; i++) {
++		nvChanged[i] = false;
++		nvSaved[i] = nvPm[i] ? nvDev[i]->configRead16(nvPm[i] + 4) : 0;
++		nvAfter[i] = nvSaved[i];
++		IOPCIDevice *d = nvDev[i];
++		auto snap = [&](int k) {
++			if (nvExp[i]) { nvLnk[i][k] = d->configRead16(nvExp[i] + 0x10); nvDc2[i][k] = d->configRead16(nvExp[i] + 0x28); }
++			if (nvL1ss[i]) nvSs1[i][k] = d->configRead32(nvL1ss[i] + 8);
++			if (nvLtr[i]) nvLtrV[i][k] = d->configRead32(nvLtr[i] + 4);
++		};
++		snap(0);
++		if (nvL1ss[i]) nvSs2[i] = d->configRead32(nvL1ss[i] + 0xC);
++		snap(1); snap(2);
++		const bool isEp = (d->configRead32(kIOPCIConfigRevisionID) >> 8) == 0x010802;
++		const uint32_t sel = nvMode & 0x300, bus = d->getBusNumber();
++		const bool picked = !isEp || !sel || (bus == 4 && (sel & 0x100)) || (bus == 5 && (sel & 0x200));
++		if ((nvMode & 0xF) >= 1 && nvPm[i] && (nvSaved[i] & 3) && nvSaved[i] != 0xFFFF) {   // D0: every drive
++			d->configWrite16(nvPm[i] + 4, (uint16_t)(nvSaved[i] & ~3));
++			IODelay(10000);                                   // D3hot -> D0: 10 ms
++			nvAfter[i] = d->configRead16(nvPm[i] + 4);
++			nvChanged[i] = true;
++			snap(1);
++			// restore what the D3hot -> D0 reset lost: LTR enable + values, L1SS (CTL2, CTL1), ASPM last (PCIe spec order)
++			if (nvExp[i] && nvDc2[i][1] != nvDc2[i][0]) d->configWrite16(nvExp[i] + 0x28, nvDc2[i][0]);
++			if (nvLtr[i] && nvLtrV[i][1] != nvLtrV[i][0]) d->configWrite32(nvLtr[i] + 4, nvLtrV[i][0]);
++			if (nvL1ss[i] && nvSs1[i][1] != nvSs1[i][0]) {
++				if (nvExp[i]) d->configWrite16(nvExp[i] + 0x10, (uint16_t)(d->configRead16(nvExp[i] + 0x10) & ~3));
++				d->configWrite32(nvL1ss[i] + 0xC, nvSs2[i]);
++				d->configWrite32(nvL1ss[i] + 8, nvSs1[i][0]);
++			}
++			if (nvExp[i] && (d->configRead16(nvExp[i] + 0x10) & 0x3) != (nvLnk[i][0] & 0x3))
++				d->configWrite16(nvExp[i] + 0x10, (uint16_t)((d->configRead16(nvExp[i] + 0x10) & ~0x3) | (nvLnk[i][0] & 0x3)));
++			snap(2);
++		}
++		nvCtrlUp[i] = false; nvPsInfo[i][0] = 0;
++		if ((nvMode & 0xF) == 2 && nvChanged[i] && isEp && picked) {                           // live PS: picked drives
++			nvCtrlUp[i] = nvmeCtrlPs(i);
++			if (nvCtrlUp[i] && (nvMode & 0x10)) {                   // MSI-X function mask for the halt
++				uint8_t mx = 0;
++				if (d->findPCICapability(kIOPCIMSIXCapability, &mx) && mx) {
++					nvMsixSaved[i] = d->configRead16(mx + 2); nvMsix[i] = mx;
++					d->configWrite16(mx + 2, (uint16_t)(nvMsixSaved[i] | 0x4000));
++				}
++			}
++		}
++	}
++}
++
++// Minimal NVMe admin path for the halt only (no I/O commands). Registers: CAP 0x0, CC 0x14, CSTS 0x1C, AQA 0x24,
++// ASQ 0x28, ACQ 0x30, doorbells 0x1000 (SQ0 tail) / 0x1000 + (4 << DSTRD) (CQ0 head).
++bool S0ixStandby::nvmeCtrlPs(uint32_t i)
++{
++	IOPCIDevice *d = nvDev[i];
++	auto info = [&](const char *msg) { snprintf(nvPsInfo[i], sizeof(nvPsInfo[i]), "%s", msg); };
++	if (!nvBuf[i] || !nvBar[i]) { info(!nvBuf[i] ? "no DMA buffer (not prepared)" : "BAR0 not mapped (not prepared)"); return false; }
++	nvCmdSaved[i] = d->configRead16(kIOPCIConfigCommand);
++	d->configWrite16(kIOPCIConfigCommand, (uint16_t)(nvCmdSaved[i] | kIOPCICommandMemorySpace | kIOPCICommandBusMaster));
++	volatile uint8_t *r = reinterpret_cast<volatile uint8_t *>(nvBar[i]->getVirtualAddress());
++	auto r32 = [&](uint32_t o) { return *reinterpret_cast<volatile uint32_t *>(r + o); };
++	auto w32 = [&](uint32_t o, uint32_t v) { *reinterpret_cast<volatile uint32_t *>(r + o) = v; };
++	auto w64 = [&](uint32_t o, uint64_t v) { w32(o, (uint32_t)v); w32(o + 4, (uint32_t)(v >> 32)); };
++	const uint64_t cap = (uint64_t)r32(0) | ((uint64_t)r32(4) << 32);
++	if (cap == ~0ULL || r32(0x1C) == 0xFFFFFFFF) { info("controller not responding"); d->configWrite16(kIOPCIConfigCommand, nvCmdSaved[i]); return false; }
++	const uint32_t toMs = (uint32_t)((cap >> 24) & 0xFF) * 500, dstrd = (uint32_t)((cap >> 32) & 0xF);
++	auto waitRdy = [&](uint32_t want) {
++		for (uint32_t t = 0; t < toMs + 500; t++) { const uint32_t st = r32(0x1C); if (st == 0xFFFFFFFF) return false; if ((st & 1) == want) return true; IODelay(1000); }
++		return false;
++	};
++	// reset (the driver left it shut down), then enable with our admin queues
++	w32(0x14, r32(0x14) & ~1u);
++	if (!waitRdy(0)) { info("reset timeout"); return false; }
++	uint8_t *mem = reinterpret_cast<uint8_t *>(nvBuf[i]->getBytesNoCopy());
++	bzero(mem, 5 * 4096);
++	const uint64_t pa = nvBuf[i]->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
++	w32(0x24, (7u << 16) | 7u);                               // 8-entry admin SQ / CQ (no wrap: 5 commands)
++	w64(0x28, pa); w64(0x30, pa + 4096);
++	w32(0x14, (4u << 20) | (6u << 16) | 1u);                  // IOCQES 16 B, IOSQES 64 B, MPS 4 KB, NVM, EN
++	if (!waitRdy(1)) { info("enable timeout"); w32(0x14, 0); waitRdy(0); return false; }
++	uint32_t tail = 0;
++	auto admin = [&](uint8_t opc, uint16_t cid, uint64_t prp1, uint32_t c10, uint32_t c11, uint32_t &status) {
++		volatile uint32_t *sq = reinterpret_cast<volatile uint32_t *>(mem + tail * 64);
++		for (int k = 0; k < 16; k++) sq[k] = 0;
++		sq[0] = opc | ((uint32_t)cid << 16);
++		sq[6] = (uint32_t)prp1; sq[7] = (uint32_t)(prp1 >> 32);
++		sq[10] = c10; sq[11] = c11;
++		const uint32_t slot = tail;
++		tail = (tail + 1) & 7;
++		OSSynchronizeIO();
++		w32(0x1000, tail);
++		volatile uint32_t *cq = reinterpret_cast<volatile uint32_t *>(mem + 4096 + slot * 16);
++		for (int t = 0; t < 2000; t++) {
++			if (cq[3] & 0x10000) { status = (cq[3] >> 17) & 0x7FFF; w32(0x1000 + (4u << dstrd), tail); return true; }
++			IODelay(500);
++		}
++		return false;
++	};
++	uint32_t st = 0;
++	if (!admin(0x06, 1, pa + 8192, 1, 0, st) || st) {          // Identify Controller
++		snprintf(nvPsInfo[i], sizeof(nvPsInfo[i]), "identify failed (status 0x%x)", st); w32(0x14, 0); waitRdy(0); return false;
++	}
++	const uint8_t *id = mem + 8192;
++	const uint32_t npss = id[263];
++	int ps = -1;
++	for (int k = (int)npss; k >= 0; k--) if (id[2048 + 32 * k + 3] & 2) { ps = k; break; }   // deepest non-operational
++	if (ps < 0) ps = (int)npss;
++	// like a normally initialised (Linux) controller: one I/O queue pair (Number of Queues, Create I/O CQ, Create I/O SQ)
++	bool ioq = admin(0x09, 3, 0, 0x07, 0, st) && !st;                                     // Set Features: 1 SQ + 1 CQ
++	const uint32_t stNq = st;
++	if (ioq) ioq = admin(0x05, 4, pa + 4 * 4096, (3u << 16) | 1u, 1u, st) && !st;        // Create I/O CQ 1, 4 entries, PC, no IRQ
++	const uint32_t stCq = st;
++	if (ioq) ioq = admin(0x01, 5, pa + 3 * 4096, (3u << 16) | 1u, (1u << 16) | 1u, st) && !st;   // Create I/O SQ 1 -> CQ 1, PC
++	// Host Memory Buffer (Identify: HMPRE @272, HMMIN @276 in 4 KB units, HMMINDS @332, HMMAXD @336)
++	const uint32_t hmpre = *reinterpret_cast<const uint32_t *>(id + 272), hmmin = *reinterpret_cast<const uint32_t *>(id + 276);
++	const uint16_t hmmaxd = *reinterpret_cast<const uint16_t *>(id + 336);
++	char hmb[48] = "no HMB";
++	uint32_t hmbSt = 0;
++	if ((nvMode & 0x60) && hmmin) {
++		const uint32_t pages = kHmbChunkBytes / 4096, need = (hmmin + pages - 1) / pages;
++		if (nvHmbN[i] < need || (hmmaxd && hmmaxd < need)) {
++			snprintf(hmb, sizeof(hmb), "HMB skipped (%u of %u chunks, maxd %u)", nvHmbN[i], need, hmmaxd);
++		} else {
++			uint32_t *dl = reinterpret_cast<uint32_t *>(mem + 8192);     // descriptor list (identify page, already parsed)
++			bzero(dl, 4096);
++			for (uint32_t c = 0; c < need; c++) {
++				const uint64_t a = nvHmb[i][c]->getPhysicalSegment(0, nullptr, kIOMemoryMapperNone);
++				dl[c * 4] = (uint32_t)a; dl[c * 4 + 1] = (uint32_t)(a >> 32); dl[c * 4 + 2] = pages;
++			}
++			auto sf = [&](uint16_t cid, uint32_t c11, uint32_t c12, uint64_t list, uint32_t cnt, uint32_t &stat) {
++				volatile uint32_t *sq = reinterpret_cast<volatile uint32_t *>(mem + tail * 64);
++				for (int k = 0; k < 16; k++) sq[k] = 0;
++				sq[0] = 0x09 | ((uint32_t)cid << 16);
++				sq[10] = 0x0D; sq[11] = c11; sq[12] = c12; sq[13] = (uint32_t)list; sq[14] = (uint32_t)(list >> 32); sq[15] = cnt;
++				const uint32_t slot = tail; tail = (tail + 1) & 7;
++				OSSynchronizeIO(); w32(0x1000, tail);
++				volatile uint32_t *cq = reinterpret_cast<volatile uint32_t *>(mem + 4096 + slot * 16);
++				for (int t = 0; t < 4000; t++) {
++					if (cq[3] & 0x10000) { stat = (cq[3] >> 17) & 0x7FFF; w32(0x1000 + (4u << dstrd), tail); return true; }
++					IODelay(500);
++				}
++				return false;
++			};
++			const bool on = sf(6, 1, need * pages, pa + 8192, need, hmbSt) && !hmbSt;
++			if (on) IODelay(200000);                                            // let the drive load its tables
++			bool off = true;
++			if (on && !(nvMode & 0x40)) off = sf(7, 0, 0, 0, 0, hmbSt) && !hmbSt;   // Linux: disable before PS
++			snprintf(hmb, sizeof(hmb), "HMB %u MB %s%s (0x%x)", need * pages / 256, on ? "on" : "FAILED",
++			         on ? ((nvMode & 0x40) ? ", kept" : off ? ", off" : ", off FAILED") : "", hmbSt);
++		}
++	}
++	(void)hmpre;
++	uint8_t msix = 0; d->findPCICapability(kIOPCIMSIXCapability, &msix);
++	const bool msixOn = msix && (d->configRead16(msix + 2) & 0x8000);
++	if (!admin(0x09, 2, 0, 0x02, (uint32_t)ps, st) || st) {    // Set Features: Power Management
++		snprintf(nvPsInfo[i], sizeof(nvPsInfo[i]), "set PS%d failed (status 0x%x, npss %u)", ps, st, npss); w32(0x14, 0); waitRdy(0); return false;
++	}
++	snprintf(nvPsInfo[i], sizeof(nvPsInfo[i]), "PS%d of 0-%u, I/O queues %s, MSI-X %s, %s", ps, npss,
++	         ioq ? "ok" : "FAILED", msix ? (msixOn ? "on" : "off") : "none", hmb);
++	return true;
++}
++
++void S0ixStandby::nvmeCtrlReset(uint32_t i)
++{
++	if (nvBar[i]) {
++		volatile uint32_t *cc = reinterpret_cast<volatile uint32_t *>(nvBar[i]->getVirtualAddress() + 0x14);
++		volatile uint32_t *csts = reinterpret_cast<volatile uint32_t *>(nvBar[i]->getVirtualAddress() + 0x1C);
++		*cc = *cc & ~1u;
++		for (int t = 0; t < 2000 && *csts != 0xFFFFFFFF && (*csts & 1); t++) IODelay(1000);
++	}
++	nvDev[i]->configWrite16(kIOPCIConfigCommand, nvCmdSaved[i]);
++}
++
++void S0ixStandby::nvmeWake()
++{
++	if (!nvN) return;
++	for (int i = (int)nvN - 1; i >= 0; i--)                   // endpoints first, then the root ports
++		if (nvChanged[i]) {
++			if (nvMsix[i]) { nvDev[i]->configWrite16(nvMsix[i] + 2, nvMsixSaved[i]); nvMsix[i] = 0; }
++			if (nvCtrlUp[i]) { nvmeCtrlReset(i); nvCtrlUp[i] = false; }
++			uint16_t v = nvDev[i]->configRead16(nvPm[i] + 4);
++			if (v != 0xFFFF) nvDev[i]->configWrite16(nvPm[i] + 4, (uint16_t)((v & ~3) | (nvSaved[i] & 3)));
++			IODelay(1000);
++		}
++	nvCount++;
++}
++
++void S0ixStandby::nobmSleep()
++{
++	static const struct { uint32_t bit; uint8_t dev, fn; } kList[] = {
++		{1, 0x14, 3}, {2, 0x1f, 6}, {4, 0x1f, 3}, {8, 0x14, 0}, {0x10, 0x15, 0}, {0x10, 0x15, 2}, {0x20, 0x0d, 0}, {0x40, 0x07, 0},
++	};
++	nobmDone = 0;
++	if (!nobmN) {   // resolve once
++		OSDictionary *match = serviceMatching("IOPCIDevice");
++		OSIterator *it = match ? getMatchingServices(match) : nullptr;
++		OSSafeReleaseNULL(match);
++		if (!it) return;
++		while (OSObject *o = it->getNextObject()) {
++			IOPCIDevice *d = OSDynamicCast(IOPCIDevice, o);
++			if (!d || d->getBusNumber() != 0) continue;
++			for (auto &w : kList)
++				if ((nobmMask & w.bit) && d->getDeviceNumber() == w.dev && d->getFunctionNumber() == w.fn && nobmN < kNoBmMax) {
++					d->retain(); nobmDev[nobmN++] = d;
++				}
++		}
++		it->release();
++	}
++	for (uint32_t i = 0; i < nobmN; i++) {
++		nobmCmd[i] = nobmDev[i]->configRead16(kIOPCIConfigCommand);
++		if (nobmCmd[i] != 0xFFFF && (nobmCmd[i] & kIOPCICommandBusMaster)) {
++			nobmDev[i]->configWrite16(kIOPCIConfigCommand, (uint16_t)(nobmCmd[i] & ~kIOPCICommandBusMaster));
++			nobmDone++;
++		} else {
++			nobmCmd[i] = 0;   // nothing to restore
++		}
++	}
++}
++
++void S0ixStandby::nobmWake()
++{
++	if (!nobmMask) return;
++	for (uint32_t i = 0; i < nobmN; i++)
++		if (nobmCmd[i]) {
++			uint16_t v = nobmDev[i]->configRead16(kIOPCIConfigCommand);
++			if (v != 0xFFFF) nobmDev[i]->configWrite16(kIOPCIConfigCommand, (uint16_t)(v | kIOPCICommandBusMaster));
++			nobmCmd[i] = 0;
++		}
++	nobmCount++;
++}
++
++void S0ixStandby::tcssSleep()
++{
++	tcssOff = false;
++	if (!pc00 || !txhcDev || !txhcPm || !iomReg) return;
++	txhcPmcsrSleep = txhcDev->configRead16(txhcPm + 4);
++	txhcPmcsrSaved = txhcPmcsrSleep;
++	if ((txhcPmcsrSleep & 3) != 3) {
++		txhcDev->configWrite16(txhcPm + 4, (uint16_t)((txhcPmcsrSleep & ~3) | 3));
++		IODelay(10000);                                   // D0 -> D3hot: 10 ms
++	}
++	tcssIom[0] = *iomReg;
++	// D3C._OFF only calls \_SB.PC00.TCOF; Apple's evaluateObject takes a plain device-relative name (a dotted path
++	// returned kIOReturnBadArgument). Fallback when TCOF is not defined (If (TRTD)): set TD3C (bit 15) directly.
++	tcssRet[0] = pc00->evaluateObject("TCOF");
++	tcssDirect = tcssRet[0] != kIOReturnSuccess;
++	if (tcssDirect) *iomReg = *iomReg | (1u << 15);
++	tcssAckMs = 0;
++	while (tcssAckMs < 100 && !(*iomReg & (1u << 16))) { IODelay(1000); tcssAckMs++; }
++	tcssIom[1] = *iomReg;
++	tcssOff = (*iomReg & (1u << 15)) != 0;
++	if (!tcssOff && (txhcPmcsrSaved & 3) != 3) txhcDev->configWrite16(txhcPm + 4, txhcPmcsrSaved);
++}
++
++void S0ixStandby::tcssWake()
++{
++	if (!tcssOff) return;
++	tcssOff = false;
++	tcssIom[2] = iomReg ? *iomReg : 0;
++	tcssRet[1] = tcssDirect ? kIOReturnUnsupported : pc00->evaluateObject("TCON");
++	if (iomReg && (*iomReg & (1u << 15))) {                     // TCON missing or failed: clear TD3C, wait TACK low
++		*iomReg = *iomReg & ~(1u << 15);
++		for (int i = 0; i < 100 && (*iomReg & (1u << 16)); i++) IODelay(1000);
++	}
++	tcssIom[3] = iomReg ? *iomReg : 0;
++	if ((txhcPmcsrSaved & 3) != 3) {
++		uint16_t v = txhcDev->configRead16(txhcPm + 4);
++		txhcDev->configWrite16(txhcPm + 4, (uint16_t)((v & ~3) | (txhcPmcsrSaved & 3)));
++		IODelay(10000);
++	}
++	tcssCount++;
++}
++
++void S0ixStandby::setupLidWake()
++{
++	setProperty("Keyboard wake", kbWake ? "armed during Deep Idle when the lid is open (-s0ixkbdwake): i8042 keyboard port + IRQ1"
++	                                    : "off (boot-arg -s0ixkbdwake)");
++	if ((kbWake || edWake) && !ioapic) {
++		// MADT on this machine: one I/O APIC at 0xFEC00000, no source override for IRQ1 (GSI 1).
++		if (IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(0xFEC00000ULL, 0x1000, kIODirectionInOut)) {
++			ioapicMap = md->map(kIOMapInhibitCache);
++			md->release();
++			if (ioapicMap) {
++				ioapic = reinterpret_cast<volatile uint32_t *>(ioapicMap->getVirtualAddress());
++				ioapic[0] = 0x01;                               // IOAPICVER: sanity check
++				uint32_t ver = ioapic[4];
++				if ((ver & 0xFF) < 0x11 || ((ver >> 16) & 0xFF) < 1) { ioapic = nullptr; OSSafeReleaseNULL(ioapicMap); }
++			}
++		}
++	}
++	if (!lwWake && !kbWake) { setProperty("Lid wake", "off (boot-arg -s0ixlidwake)"); return; }
++	static const char *hids[2] = { "PNP0C0D", "PNP0C0E" };
++	const IORegistryPlane *plane = IORegistryEntry::getPlane("IOACPIPlane");
++	if (!plane) return;
++	for (int i = 0; i < 2; i++) {
++		OSString *hid = OSString::withCString(hids[i]);
++		if (!hid) continue;
++		if (IORegistryIterator *it = IORegistryIterator::iterateOver(plane, kIORegistryIterateRecursively)) {
++			while (IORegistryEntry *e = it->getNextObject()) {
++				IOACPIPlatformDevice *d = OSDynamicCast(IOACPIPlatformDevice, e);
++				if (!d || !d->compareName(hid, nullptr)) continue;
++				d->retain();
++				lwDev[i] = d;
++				OSObject *prw = nullptr;
++				if (lwGpe == 0xFFFFFFFF && d->evaluateObject("_PRW", &prw) == kIOReturnSuccess && prw) {
++					if (OSArray *a = OSDynamicCast(OSArray, prw))
++						if (OSNumber *n = OSDynamicCast(OSNumber, a->getObject(0)))
++							lwGpe = n->unsigned32BitValue();
++				}
++				OSSafeReleaseNULL(prw);
++				break;
++			}
++			it->release();
++		}
++		hid->release();
++	}
++	if (lwGpe != 0xFFFFFFFF && (!gpe0EnPort || lwGpe / 8 >= gpe0Half)) lwGpe = 0xFFFFFFFF;
++	// GPIO-routed GPE (DW0..DW2 = GPEs 0x00-0x5F): find its group/pad from the BIOS GNVS (GEI0-2 group, GED0-2 dword)
++	// and the GPIO community's GPI_GPE_STS / GPI_GPE_EN through the DSDT's own helper \_SB.GADR(group, 5).
++	if (lwGpe != 0xFFFFFFFF && lwGpe < 0x60 && lwDev[0]) {
++		// Apple's evaluateObject only handles methods/names (not GNVS field units) and is device-relative: from the
++		// \_SB node, find the pad whose GGPE() is our GPE by walking the DSDT's GPIO groups (GMXG, GINF(g,1) pads).
++		UInt32 grp = 0, dw = 0, padFound = 0xFFFFFFFF;
++		char gb[160] = "";
++		IOACPIPlatformDevice *sb = nullptr;
++		if (const IORegistryPlane *ap = IORegistryEntry::getPlane("IOACPIPlane"))
++			sb = OSDynamicCast(IOACPIPlatformDevice, lwDev[0]->getParentEntry(ap));
++		UInt32 ngrp = 0;
++		const char *form = nullptr;
++		if (sb && sb->evaluateInteger("GMXG", &ngrp) == kIOReturnSuccess && ngrp && ngrp < 64) {
++			for (UInt32 g = 0; g < ngrp && padFound == 0xFFFFFFFF; g++) {
++				UInt32 npads = 0;
++				OSObject *ga[2] = { OSNumber::withNumber(g, 32), OSNumber::withNumber(1, 32) };
++				OSObject *gr = nullptr;
++				if (ga[0] && ga[1] && sb->evaluateObject("GINF", &gr, ga, 2) == kIOReturnSuccess && gr)
++					if (OSNumber *n = OSDynamicCast(OSNumber, gr)) npads = n->unsigned32BitValue();
++				OSSafeReleaseNULL(gr); OSSafeReleaseNULL(ga[0]); OSSafeReleaseNULL(ga[1]);
++				for (UInt32 p = 0; p < npads && p < 256; p++) {
++					OSObject *pa0 = OSNumber::withNumber(((uint64_t)g << 16) | p, 32);
++					OSObject *r = nullptr;
++					UInt32 gpe = 0xFFFFFFFF;
++					if (pa0 && sb->evaluateObject("GGPE", &r, &pa0, 1) == kIOReturnSuccess && r)
++						if (OSNumber *n = OSDynamicCast(OSNumber, r)) gpe = n->unsigned32BitValue();
++					OSSafeReleaseNULL(r); OSSafeReleaseNULL(pa0);
++					if (gpe == lwGpe) { grp = g; padFound = p; dw = p / 32; form = "GGPE search"; break; }
++				}
++			}
++		}
++		if (form) {
++			OSObject *args[2] = { OSNumber::withNumber(grp, 32), OSNumber::withNumber(5, 32) };
++			OSObject *res = nullptr;
++			uint64_t sts = 0;
++			if (args[0] && args[1] && sb->evaluateObject("GADR", &res, args, 2) == kIOReturnSuccess && res)
++				if (OSNumber *n = OSDynamicCast(OSNumber, res)) sts = n->unsigned64BitValue() + (uint64_t)dw * 4;
++			OSSafeReleaseNULL(res);
++			OSSafeReleaseNULL(args[0]); OSSafeReleaseNULL(args[1]);
++			uint32_t pad = padFound;
++			uint32_t padcfg = 0xFFFFFFFF, own = 0xFFFFFFFF;
++			OSObject *pa = OSNumber::withNumber(((uint64_t)grp << 16) | pad, 32);
++			if (pa) {
++				OSObject *r2 = nullptr;
++				if (sb->evaluateObject("GPC0", &r2, &pa, 1) == kIOReturnSuccess && r2)
++					if (OSNumber *n = OSDynamicCast(OSNumber, r2)) padcfg = n->unsigned32BitValue();
++				OSSafeReleaseNULL(r2);
++				if (sb->evaluateObject("GHPO", &r2, &pa, 1) == kIOReturnSuccess && r2)
++					if (OSNumber *n = OSDynamicCast(OSNumber, r2)) own = n->unsigned32BitValue();
++				OSSafeReleaseNULL(r2);
++				pa->release();
++			}
++			if (sts && (sts & 3) == 0 && ((sts + 0x20) & ~0xFFFULL) == (sts & ~0xFFFULL)) {
++				if (IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(sts & ~0xFFFULL, 0x1000, kIODirectionInOut)) {
++					lwGpioMap = md->map(kIOMapInhibitCache);
++					md->release();
++					if (lwGpioMap) {
++						uint8_t *base = reinterpret_cast<uint8_t *>(lwGpioMap->getVirtualAddress()) + (sts & 0xFFF);
++						lwGpeSts = reinterpret_cast<volatile uint32_t *>(base);
++						lwGpeEn = reinterpret_cast<volatile uint32_t *>(base + 0x20);
++						lwGpioBit = 1u << (lwGpe % 32);
++					}
++				}
++			}
++			if (lwPad && !lwPadMap) {
++				OSObject *pargs[2] = { OSNumber::withNumber(grp, 32), OSNumber::withNumber(2, 32) };
++				OSObject *pres = nullptr;
++				uint64_t pc = 0;
++				if (pargs[0] && pargs[1] && sb->evaluateObject("GADR", &pres, pargs, 2) == kIOReturnSuccess && pres)
++					if (OSNumber *n = OSDynamicCast(OSNumber, pres)) pc = n->unsigned64BitValue() + (uint64_t)pad * 0x10;
++				OSSafeReleaseNULL(pres); OSSafeReleaseNULL(pargs[0]); OSSafeReleaseNULL(pargs[1]);
++				if (pc && (pc & 3) == 0)
++					if (IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pc & ~0xFFFULL, 0x1000, kIODirectionInOut)) {
++						lwPadMap = md->map(kIOMapInhibitCache);
++						md->release();
++						if (lwPadMap) lwPadCfg = reinterpret_cast<volatile uint32_t *>(lwPadMap->getVirtualAddress() + (pc & 0xFFF));
++					}
++				// sanity: the mapped register must read what GPC0 returned
++				if (lwPadCfg && *lwPadCfg != padcfg) { lwPadCfg = nullptr; OSSafeReleaseNULL(lwPadMap); }
++			}
++			snprintf(gb, sizeof(gb), "GPE 0x%x = GPIO group %u pad %u, GPI_GPE_STS 0x%llx (EN +0x20)%s, PADCFG0 0x%08x, HOSTSW_OWN %u [%s]",
++			         lwGpe, (unsigned)grp, pad, (unsigned long long)sts, lwGpeEn ? "" : " NOT MAPPED", padcfg, own, form);
++		} else {
++			snprintf(gb, sizeof(gb), "GPE 0x%x: no pad found (\\_SB %s, GMXG %u)", lwGpe, sb ? sb->getName() : "not found", (unsigned)ngrp);
++		}
++		setProperty("Lid wake GPIO", gb);
++		LOG("Lid wake GPIO %s", gb);
++	}
++	char buf[128];
++	snprintf(buf, sizeof(buf), "%s: lid %s, sleep button %s, wake GPE 0x%x",
++	         lwWake ? "armed during Deep Idle (-s0ixlidwake)" : "off (boot-arg -s0ixlidwake)",
++	         lwDev[0] ? lwDev[0]->getName() : "not found", lwDev[1] ? lwDev[1]->getName() : "not found", lwGpe);
++	setProperty("Lid wake", buf);
++	LOG("Lid wake %s", buf);
++	if (!pbCall) pbCall = thread_call_allocate(pbUserActive, this);
++}
++
++void S0ixStandby::lidPsw(bool on)
++{
++	for (int i = 0; i < 2; i++) {
++		if (!lwDev[i]) continue;
++		OSObject *arg = OSNumber::withNumber(on ? 1 : 0, 32);
++		if (!arg) continue;
++		IOReturn r = lwDev[i]->evaluateObject("_PSW", nullptr, &arg, 1);
++		DBG("%s._PSW(%d) -> 0x%x", lwDev[i]->getName(), on ? 1 : 0, r);
++		arg->release();
++	}
++}
++
+ void S0ixStandby::findEcGpe()
+ {
+ 	uint32_t forced = 0;
+@@ -1151,6 +2101,7 @@ void S0ixStandby::findEcGpe()
+ 			if (ec->evaluateInteger("_GPE", &v) == kIOReturnSuccess) {
+ 				ecGpe = v;
+ 				ecGpeFrom = ec->getName();
++				if (!ecDev) { ecDev = ec; ecDev->retain(); }
+ 				break;
+ 			}
+ 		}
+@@ -1196,6 +2147,23 @@ void S0ixStandby::publishWakeInfo()
+ 			}
+ 	if (!n) snprintf(buf, sizeof(buf), "none latched (PM1_STS 0x%04x)", pm1StsAtWake);
+ 	setProperty("Last wake source", buf);
++	{
++		char en[2 * sizeof(gpe0EnAtHalt) + 1]; size_t k = 0;
++		for (uint32_t i = 0; i < gpe0Half && i < sizeof(gpe0EnAtHalt); i++)
++			k += snprintf(en + k, sizeof(en) - k, "%02x", gpe0EnAtHalt[i]);
++		setProperty("GPE0_EN at last halt (byte 0 first)", en);
++		char rb[140];
++		if (lwPad) {
++			char pb[160];
++			snprintf(pb, sizeof(pb), "%s: PADCFG0 saved 0x%08x, halt 0x%08x, at wake 0x%08x (pin %u), GPI_GPE_STS at wake 0x%08x",
++			         lwPadCfg ? (lwPadArmed == 2 ? "armed last sleep" : "not armed last sleep") : "pad not mapped",
++			         lwPadSaved, lwPadHalt, lwPadWake, (lwPadWake >> 1) & 1, lwGpeStsAtWake);
++			setProperty("Lid wake pad", pb);
++		}
++		snprintf(rb, sizeof(rb), "lid GPE enable 0x%08x (GPIO GPI_GPE_EN when mapped), status at wake 0x%08x, EC GPE dword 0x%08x",
++		         lwEnReadback, lwGpeStsAtWake, ecEnReadback);
++		setProperty("GPE0_EN readback at last halt", rb);
++	}
+ 	if (ecGpe != 0xFFFFFFFF) {
+ 		snprintf(buf, sizeof(buf), "%s by macOS%s", ecEnAtHalt ? "enabled" : "disabled",
+ 		         ecWake && !ecEnAtHalt ? ", armed by -s0ixecwake" : "");
+@@ -1221,10 +2189,26 @@ void S0ixStandby::updateAC()
+ 	onAC = ac;
+ }
+ 
++// -s0ixacnoec: keep LID's wake GPE in step with the power source (registry writes only here, never in the sleep path).
++void S0ixStandby::acNoEcApply()
++{
++	if (!acNoEc || !lwDev[0]) return;
++	if (!acNoEcSaved) acNoEcSaved = lwDev[0]->copyProperty("acpi-wake-gpe");   // the boot value (EC GPE via SSDT)
++	if (!acNoEcSaved) return;
++	if (onAC && !acNoEcActive) {
++		if (OSNumber *n = OSNumber::withNumber(0x17, 32)) { lwDev[0]->setProperty("acpi-wake-gpe", n); n->release(); }
++		acNoEcActive = true;
++	} else if (!onAC && acNoEcActive) {
++		lwDev[0]->setProperty("acpi-wake-gpe", acNoEcSaved);
++		acNoEcActive = false;
++	}
++}
++
+ void S0ixStandby::acTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	if (S0ixStandby *self = OSDynamicCast(S0ixStandby, owner)) {
+ 		self->updateAC();
++		self->acNoEcApply();
+ 		sender->setTimeoutMS(10000);
+ 	}
+ }
+@@ -1308,6 +2292,15 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ 			self->findEcGpe();
+ 			if (self->ecGpe != 0xFFFFFFFF) self->publishEcWake();
+ 		}
++		if (self->gpuMMIO) gDispMMIO = self->gpuMMIO;
++		self->publishTypeC();
++		if (self->acNoEc) {
++			char t[120];
++			snprintf(t, sizeof(t), "on (-s0ixacnoec): %u sleeps on AC with the EC wake disarmed; now %s, LID wake GPE %s", self->acNoEcCount,
++			         self->onAC ? "on AC" : "on battery", self->acNoEcActive ? "0x17 (EC off)" : "boot value (EC)");
++			self->setProperty("EC wake on AC", t);
++		}
++		self->nvmePrep();
+ 		self->publishLog();
+ 		sender->setTimeoutMS(60000);
+ 	}
+@@ -1330,15 +2323,27 @@ void S0ixStandby::onSleep()
+ 	if (gpuMMIO) {
+ 		gpuSleep();
+ 		dispCapture(dispAtSleep, nullptr);
++		gDispMMIO = gpuMMIO;
++		gDispOk = dispAtSleep.valid;
+ 		if (refclkWA) refclkSleep();
+ 	}
+ 	// Drivers (and IOPCIFamily's D3 transition) are done by now.
+ 	wifiPmcsrSleep = wifiDev ? wifiDev->configRead16(wifiPmCap + 4) : 0xFFFF;
+ 
++	if (acNoEc && acNoEcActive && lastSleepType == kSleepTypeDeepIdle) acNoEcCount++;
++	if (lwWake && lastSleepType == kSleepTypeDeepIdle) lidPsw(true);   // while the EC still answers normally
++	if (tcssD3 && lastSleepType == kSleepTypeDeepIdle) tcssSleep();   // before the LPS0 entry _DSM, like Linux
++	if (nobmMask && lastSleepType == kSleepTypeDeepIdle) nobmSleep();
++	if (lastSleepType == kSleepTypeDeepIdle) nvmeSleep();
+ 	entered = false;
+ 	if (dsmEnabled && lastSleepType == kSleepTypeDeepIdle &&
+ 	    (dsmMask[kIntel] || dsmMask[kMicrosoft] || dsmMask[kAMD])) {
++		if (iomReg) iomV[0] = *iomReg;
+ 		dsmEntry();
++		if (iomReg) {
++			if (iomNoDpof && (*iomReg & (1u << 17))) *iomReg = *iomReg & ~(1u << 17);
++			iomV[1] = *iomReg;
++		}
+ 		entered = true;
+ 	}
+ 	// Last step: nothing after us may touch PM1_EN before the halt.
+@@ -1355,12 +2360,85 @@ void S0ixStandby::onSleep()
+ 		rtcBlocked = true;
+ 	}
+ 	ecArm = ecWake && gpe0EnPort && ecGpe != 0xFFFFFFFF && lastSleepType == kSleepTypeDeepIdle;
++	pbArm = pbWake && pbEnPort && pm1StsPort && gpe0StsPort && lastSleepType == kSleepTypeDeepIdle;
++	lwArm = lwWake && (lwDev[0] || lwDev[1]) && lastSleepType == kSleepTypeDeepIdle;
++	lwWoke = false;
++	kbArm = false; kbWoke = false; kbArmResult = 0; kbStsAtWake = 0;
++	if (kbWake && lastSleepType == kSleepTypeDeepIdle) {
++		UInt32 open = 1;                                   // no lid device: treat as open
++		if (lwDev[0] && lwDev[0]->evaluateInteger("_LID", &open) != kIOReturnSuccess) open = 1;
++		kbArm = open != 0;
++	}
++	pbArmed = false; pbWoke = false;
+ 	ecArmed = false;
+ 	wakeInfoValid = false;
+ 	DBG("sleep: type %u, dsm %s, counter %llu, rtc wake %s", lastSleepType, entered ? "entry" : "skipped",
+ 	    counterAtSleep, rtcBlocked ? "blocked (AC)" : "allowed");
+ }
+ 
++void S0ixStandby::elReplay(thread_call_param_t self, thread_call_param_t)
++{
++	S0ixStandby *me = static_cast<S0ixStandby *>(self);
++	if (!me->elPending) return;
++	me->elPending = false;
++	uint8_t n = me->elN, q[8];
++	for (uint8_t i = 0; i < n; i++) q[i] = me->elQ[i];
++	for (uint8_t i = 0; i < n && me->ecDev; i++) {          // let ACPI see the events (battery, AC, lid, keys)
++		char name[8]; snprintf(name, sizeof(name), "_Q%02X", q[i]);
++		me->ecDev->evaluateObject(name);
++	}
++	clock_sec_t sec; clock_usec_t us; clock_get_calendar_microtime(&sec, &us);
++	char line[112]; int k = snprintf(line, sizeof(line), "#%u %02lu:%02lu:%02lu UTC: %s%s%s EC status 0x%02x, queries:", ++me->elSeq,
++		(unsigned long)((sec / 3600) % 24), (unsigned long)((sec / 60) % 60), (unsigned long)(sec % 60),
++		me->elEc ? "EC GPE" : "not EC", (me->elPm1 & kPm1PwrBtn) ? " +PWRBTN" : "", (me->elPm1 & (1u << 10)) ? " +RTC" : "", me->elSci);
++	for (uint8_t i = 0; i < n && k < (int)sizeof(line) - 5; i++) k += snprintf(line + k, sizeof(line) - (size_t)k, " %02X", q[i]);
++	if (!n && k < (int)sizeof(line) - 6) snprintf(line + k, sizeof(line) - (size_t)k, " none");
++	const uint32_t slot = (me->elSeq - 1) % 24;
++	snprintf(me->elLines[slot], sizeof(me->elLines[slot]), "%s", line);
++	if (OSArray *a = OSArray::withCapacity(24)) {
++		const uint32_t cnt = me->elSeq < 24 ? me->elSeq : 24;
++		for (uint32_t j = 0; j < cnt; j++) {
++			const uint32_t idx = (me->elSeq - cnt + j) % 24;
++			if (OSString *str = OSString::withCString(me->elLines[idx])) { a->setObject(str); str->release(); }
++		}
++		me->setProperty("EC wake log", a);
++		a->release();
++	}
++	LOG("EC wake: %s", line);
++}
++
++void S0ixStandby::edReplay(thread_call_param_t self, thread_call_param_t)
++{
++	// Run the EC query methods we drained at the halt, so no EC event (battery, AC, lid, keys) is lost.
++	S0ixStandby *me = static_cast<S0ixStandby *>(self);
++	uint8_t n = me->edN;
++	me->edN = 0;
++	for (uint8_t i = 0; i < n && me->ecDev; i++) {
++		char name[8]; snprintf(name, sizeof(name), "_Q%02X", me->edQ[i]);
++		IOReturn r = me->ecDev->evaluateObject(name);
++		LOG("EC drain replay %s -> 0x%x", name, r);
++	}
++}
++
++void S0ixStandby::pbUserActive(thread_call_param_t self, thread_call_param_t)
++{
++	// Same call the HID system makes on user input: in a dark wake the root domain turns it into a full wake
++	// ("Requesting full wake due to dark wake activity tickle").
++	S0ixStandby *me = static_cast<S0ixStandby *>(self);
++	if (OSDictionary *m = IOService::serviceMatching("IODisplayWrangler")) {
++		if (IOService *w = IOService::copyMatchingService(m)) {
++			w->activityTickle(0, 0);
++			w->release();
++		}
++		m->release();
++	}
++	// Once more a little later, in case the first one came before the wrangler was ready.
++	if (me->pbTickles++ < 1 && me->pbCall) {
++		uint64_t dl; clock_interval_to_deadline(1200, kMillisecondScale, &dl);
++		thread_call_enter_delayed(me->pbCall, dl);
++	}
++}
++
+ void S0ixStandby::onWake()
+ {
+ 	// First: give RTC wakes back before anything else runs.
+@@ -1378,10 +2456,71 @@ void S0ixStandby::onWake()
+ 	ecArmed = false;
+ 	if (wakeInfoValid && ecGpe != 0xFFFFFFFF && (gpe0StsAtWake[ecGpe / 8] >> (ecGpe % 8) & 1))
+ 		ecWakeCount++;
++	if (edWake && lastSleepType == kSleepTypeDeepIdle) {
++		char ed[300]; int n = snprintf(ed, sizeof(ed), "EC status at halt 0x%02x (GPE sts %d), drained %u:", ecStsAtHalt,
++		                               (int)edGpeStsAtHalt, edN);
++		for (uint8_t i = 0; i < edN && n < (int)sizeof(ed) - 6; i++) n += snprintf(ed + n, sizeof(ed) - (size_t)n, " _Q%02X", edQ[i]);
++		snprintf(ed + n, sizeof(ed) - (size_t)n, "; EC status at wake 0x%02x, EC GPE dword at wake 0x%08x; PM1_CNT 0x%04x; SCI RTE 0x%08x:%08x%s",
++		         ecStsAtWakeP, ecEnAtWake, pm1CntAtHalt, sciRteHigh, sciRteLow, ioapic ? "" : " (no IOAPIC map)");
++		setProperty("EC drain at last sleep", ed);
++		if (edN && ecDev && edCall) {
++			uint64_t dl; clock_interval_to_deadline(500, kMillisecondScale, &dl);
++			thread_call_enter_delayed(edCall, dl);
++		}
++	}
++	if (kbWake) {
++		char kb[160];
++		snprintf(kb, sizeof(kb), "%s, arm result %u, command byte 0x%02x -> 0x%02x, status at wake 0x%02x, IRQ1 RTE 0x%08x:%08x%s",
++		         kbArm ? "armed" : "not armed (lid closed)", kbArmResult, kbCfgBefore, kbCfgSet, kbStsAtWake,
++		         kbRteHigh, kbRteLow, ioapic ? "" : " (no IOAPIC map)");
++		setProperty("Keyboard at last sleep", kb);
++	}
++	if (kbWoke) {
++		kbWoke = false;
++		kbWakeCount++;
++		setProperty("Keyboard wakes", (unsigned long long)kbWakeCount, 32);
++		pbTickles = 0;
++		if (pbCall) {
++			uint64_t dl; clock_interval_to_deadline(300, kMillisecondScale, &dl);
++			thread_call_enter_delayed(pbCall, dl);
++		}
++	}
++	if (lwWoke) {
++		lwWoke = false;
++		lwWakeCount++;
++		setProperty("Lid wakes", (unsigned long long)lwWakeCount, 32);
++		pbTickles = 0;
++		if (pbCall) {
++			uint64_t dl; clock_interval_to_deadline(300, kMillisecondScale, &dl);
++			thread_call_enter_delayed(pbCall, dl);
++		}
++	}
++	if (pbWoke) {
++		// macOS sees no wake reason and would stay in dark wake and sleep again: ask for a full (user) wake
++		// once the wake transition is under way.
++		pbWoke = false;
++		pbWakeCount++;
++		setProperty("Power button wakes", (unsigned long long)pbWakeCount, 32);
++		pbTickles = 0;
++		if (pbCall) {
++			uint64_t dl; clock_interval_to_deadline(300, kMillisecondScale, &dl);
++			thread_call_enter_delayed(pbCall, dl);
++		}
++	}
+ 	if (entered) {
++		if (iomReg) iomV[2] = *iomReg;
+ 		dsmExit();
++		if (iomReg) {
++			iomV[3] = *iomReg;
++			if (iomCall) { uint64_t dl; clock_interval_to_deadline(2000, kMillisecondScale, &dl); thread_call_enter_delayed(iomCall, dl); }
++		}
+ 		entered = false;
+ 	}
++	nvmeWake();
++	nobmWake();
++	tcssWake();
++	if (elPending && elCall) { uint64_t dl; clock_interval_to_deadline(200, kMillisecondScale, &dl); thread_call_enter_delayed(elCall, dl); }
++	if (lwWake && lastSleepType == kSleepTypeDeepIdle) lidPsw(false);
+ 	// Before any driver wakes: Apple's accelerator restarts the engines later.
+ 	if (gpuMMIO) {
+ 		dispCapture(dispAtWake, &dispAtSleep);
+diff --git a/S0ixStandby/S0ixStandby.hpp b/S0ixStandby/S0ixStandby.hpp
+index 06c299b..8136815 100644
+--- a/S0ixStandby/S0ixStandby.hpp
++++ b/S0ixStandby/S0ixStandby.hpp
+@@ -13,9 +13,11 @@
+ #define S0IXSTANDBY_HPP
+ 
+ #include <IOKit/IOService.h>
++#include <kern/thread_call.h>
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/acpi/IOACPIPlatformDevice.h>
+ #include <IOKit/pci/IOPCIDevice.h>
+ 
+@@ -237,6 +239,141 @@ private:
+ 	// Wake sources (read-only by default) and -s0ixecwake: keep the EC's
+ 	// GPE armed during Deep Idle so lid open (EC query) can wake.
+ 	bool ecWake {false}, ecArm {false}, ecArmed {false}, wakeInfoValid {false};
++	// -s0ixpwrbtn: PM1 fixed power-button event as a Deep Idle wake source (control-method power button laptops).
++	bool pbWake {false}, pbArm {false}, pbArmed {false};
++	volatile bool pbWoke {false};
++	uint16_t pbEnPort {0};
++	uint32_t pbWakeCount {0};
++	uint32_t pbTickles {0};
++	// -s0ixlidwake: EC wake line for lid / sleep button (their _PSW + _PRW GPE), like Linux does for s2idle.
++	bool lwWake {false}, lwArm {false};
++	volatile bool lwWoke {false};
++	IOACPIPlatformDevice *lwDev[2] {nullptr, nullptr};
++	uint32_t lwGpe {0xFFFFFFFF}, lwWakeCount {0};
++	uint8_t gpe0EnAtHalt[16] {};
++	uint32_t lwEnReadback {0}, ecEnReadback {0};   // 32-bit GPE0_EN dword after arming
++	// -s0ixkbdwake: PS/2 keyboard (i8042) as a Deep Idle wake source, armed only when the lid is open.
++	bool kbWake {false}, kbArm {false};
++	volatile bool kbWoke {false};
++	uint8_t kbCfgBefore {0}, kbCfgSet {0}, kbStsAtWake {0}, kbArmResult {0};
++	uint32_t kbWakeCount {0};
++	IOMemoryMap *ioapicMap {nullptr};
++	volatile uint32_t *ioapic {nullptr};
++	uint32_t kbRteLow {0}, kbRteHigh {0};
++	bool kbRteUnmasked {false};
++	// GPE 0x00-0x5F are GPIO-routed on this PCH: the enable bit lives in the GPIO community (GPI_GPE_EN).
++	IOMemoryMap *lwGpioMap {nullptr};
++	volatile uint32_t *lwGpeSts {nullptr}, *lwGpeEn {nullptr};
++	uint32_t lwGpioBit {0}, lwGpeEnSaved {0}, lwGpeStsAtWake {0};
++	// -s0ixlidpad (with -s0ixlidwake): the lid GPE's pad is BIOS-disabled (PADCFG0 RX disabled, no SCI route). For the
++	// halt: RX on, SCI route, both edges; restore at wake. EC's legacy wake pin -> only HWxx-enabled events wake.
++	bool lwPad {false};
++	IOMemoryMap *lwPadMap {nullptr};
++	volatile uint32_t *lwPadCfg {nullptr};
++	uint32_t lwPadSaved {0}, lwPadHalt {0}, lwPadWake {0}, lwPadArmed {0};
++	bool lwGpioArmed {false};
++	// -s0ixecdrain: drain pending EC queries (SCI_EVT) at the halt so the EC can raise a fresh SCI (lid open), replay after.
++	bool edWake {false};
++	IOACPIPlatformDevice *ecDev {nullptr};
++	uint8_t edQ[8] {}, edN {0}, ecStsAtHalt {0}, ecStsAtWakeP {0};
++	// -s0ixeclog (diagnostic): at the active action, if the EC GPE woke us, drain the pending EC queries (QR_EC),
++	// replay them from a thread and keep a rolling log of what each Deep Idle wake was ("EC wake log").
++	bool ecLog {false}, elPending {false};
++	// -s0ixacnoec: on AC the EC sends a battery event (_Q24) every ~56 s and powerd lingers 45 s in each dark wake.
++	// While on AC, point LID's acpi-wake-gpe at its dead legacy pin (0x17) for the sleep so AppleACPIPlatform does not
++	// arm the EC GPE; restore at wake. On battery nothing changes (lid-open wake via the EC).
++	bool acNoEc {false}, acNoEcActive {false};
++	OSObject *acNoEcSaved {nullptr};
++	uint32_t acNoEcCount {0};
++	void acNoEcApply();
++	uint8_t elQ[8] {}, elN {0}, elSci {0};
++	uint16_t elPm1 {0};
++	bool elEc {false};
++	thread_call_t elCall {nullptr};
++	char elLines[24][112] {};
++	uint32_t elSeq {0};
++	static void elReplay(thread_call_param_t self, thread_call_param_t);
++	bool edGpeStsAtHalt {false};
++	uint32_t sciRteLow {0}, sciRteHigh {0}, ecEnAtWake {0};
++	uint16_t pm1CntAtHalt {0}, pm1CntPort {0};
++	bool sciUnmasked {false};
++	thread_call_t edCall {nullptr};
++	static void edReplay(thread_call_param_t self, thread_call_param_t);
++	// Type-C IOM (REGBAR + 0xC10000): DPOF ("all monitors off", set by the LPS0 entry _DSM), TD3C, TACK.
++	bool iomNoDpof {false};
++	IOMemoryMap *iomMap {nullptr};
++	volatile uint32_t *iomReg {nullptr};          // IOM + 0x40
++	uint32_t iomV[5] {};                          // before entry, after entry(+fix), wake before exit, after exit, +2 s
++	thread_call_t iomCall {nullptr};
++	void setupIom();
++	// Type-C diagnostics (read-only): PCI PM state of 00:0d.0/0d.2/07.x and the TBT xHCI's PORTSC registers.
++	IOMemoryMap *txhcMap {nullptr};
++	void publishTypeC();
++	// -s0ixtcssd3: TCSS D3cold around Deep Idle like Linux RTD3 (TCSS xHCI 00:0d.0 D3hot, then \_SB.PC00.D3C._OFF -> TCOF
++	// -> IOM TD3C=1; wake: D3C._ON -> TCON (TD3C=0, waits TACK), xHCI back to its PM state).
++	bool tcssD3 {false}, tcssOff {false}, tcssDirect {false};
++	IOACPIPlatformDevice *pc00 {nullptr};
++	IOPCIDevice *txhcDev {nullptr};
++	uint8_t txhcPm {0};
++	uint16_t txhcPmcsrSaved {0}, txhcPmcsrSleep {0};
++	uint32_t tcssIom[4] {}, tcssCount {0}, tcssAckMs {0};
++	IOReturn tcssRet[2] {};
++	void tcssSleep();
++	void tcssWake();
++	// s0ixnobm=<mask>: clear PCI Bus Master Enable for the Deep Idle (sleep action -> wake action) on PCH bus masters
++	// whose macOS drivers may leave DMA running: 1 CNVi 00:14.3, 2 GbE 00:1f.6, 4 HDA 00:1f.3, 8 PCH xHCI 00:14.0,
++	// 0x10 LPSS I2C 00:15.0/15.2, 0x20 TCSS xHCI 00:0d.0, 0x40 TBT RP 00:07.0
++	uint32_t nobmMask {0};
++	static constexpr int kNoBmMax = 8;
++	IOPCIDevice *nobmDev[kNoBmMax] {};
++	uint16_t nobmCmd[kNoBmMax] {};
++	uint32_t nobmN {0}, nobmDone {0}, nobmCount {0};
++	void nobmSleep();
++	void nobmWake();
++	// NVMe drives + their CPU root ports (00:06.0/06.2): PCI PM state at the sleep action (always recorded).
++	// -s0ixnvmed0: put them back to D0 for the Deep Idle (Linux nvme.noacpi=1: NVMe D3hot pinned the package at PC3,
++	// D0 + APST/L1.2 reached PC10/S0ix 0.78 W); the wake action restores the state macOS left before drivers wake.
++	bool nvmeD0 {false};
++	static constexpr int kNvMax = 6;
++	IOPCIDevice *nvDev[kNvMax] {};
++	uint8_t nvPm[kNvMax] {};
++	uint16_t nvSaved[kNvMax] {}, nvAfter[kNvMax] {};
++	bool nvChanged[kNvMax] {};
++	// PCIe link power config of each function (a D3hot -> D0 transition can reset it): PCIe cap, L1SS ext cap, LTR ext cap
++	uint16_t nvExp[kNvMax] {}, nvL1ss[kNvMax] {}, nvLtr[kNvMax] {};
++	uint16_t nvLnk[kNvMax][3] {}, nvDc2[kNvMax][3] {};      // [0] saved, [1] after D0, [2] after restore
++	uint32_t nvSs1[kNvMax][3] {}, nvSs2[kNvMax] {}, nvLtrV[kNvMax][3] {};
++	uint32_t nvN {0}, nvCount {0};
++	void nvmeSleep();
++	void nvmeWake();
++	// -s0ixnvmeps (with -s0ixnvmed0): like Linux nvme_suspend with nvme.noacpi=1 - for the halt, bring each drive's
++	// controller up with a private admin queue and Set Features (Power Management) to its deepest non-operational
++	// power state; at wake reset the controller (CC.EN=0) before macOS's NVMe driver re-initialises it.
++	bool nvmePs {false};
++	IOMemoryMap *nvBar[kNvMax] {};
++	IOBufferMemoryDescriptor *nvBuf[kNvMax] {};          // 5 pages: admin SQ, admin CQ, identify, I/O SQ, I/O CQ
++	uint16_t nvCmdSaved[kNvMax] {};
++	bool nvCtrlUp[kNvMax] {};
++	char nvPsInfo[kNvMax][140] {};
++	bool nvmeCtrlPs(uint32_t i);
++	void nvmePrep();
++	bool prepAlloc {true};
++	uint32_t nvMode {0};
++	uint8_t nvMsix[kNvMax] {};
++	uint16_t nvMsixSaved[kNvMax] {};
++	// Host Memory Buffer for DRAM-less drives (debug.s0ix.nvme +0x20: enable, settle, disable before PS4 like Linux;
++	// +0x40: keep it enabled through the halt). 16 x 4 MB physically contiguous chunks per drive, allocated awake.
++	static constexpr int kHmbChunks = 16;
++	static constexpr uint32_t kHmbChunkBytes = 4u << 20;
++	IOBufferMemoryDescriptor *nvHmb[kNvMax][kHmbChunks] {};
++	uint32_t nvHmbN[kNvMax] {};
++	void nvmeCtrlReset(uint32_t i);
++	uint64_t smiLast {0}, smiTscLast {0};
++	static void iomLater(thread_call_param_t self, thread_call_param_t);
++	void setupLidWake();
++	void lidPsw(bool on);
++	thread_call_t pbCall {nullptr};
++	static void pbUserActive(thread_call_param_t self, thread_call_param_t);
+ 	uint16_t pm1StsPort {0}, gpe0StsPort {0}, gpe0EnPort {0};
+ 	uint8_t gpe0Half {0};                  // bytes in each of the status/enable halves
+ 	uint32_t ecGpe {0xFFFFFFFF};           // EC _GPE number, if a GPE0 bit

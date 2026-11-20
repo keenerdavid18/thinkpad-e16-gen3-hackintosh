@@ -28,13 +28,17 @@ license (as recorded by GitHub, checked 2026-11-02). Sources and versions:
 | IntelBluetoothFirmware, IntelBTPatcher | 2.5.2 (`14787a2`), built by `src/intelbluetooth`; IntelBluetoothFirmware's power state patched for idle suspend (`src/intelbluetooth/patches`) | [lshbluesky/IntelBluetoothFirmware](https://github.com/lshbluesky/IntelBluetoothFirmware) | GPL-3.0; Intel firmware under its linux-firmware license |
 | NootedGreen | JulioNectar reference `24450b4` (NootedGreen base `95f8189`) + henriquejsza/VostroXe's HDMI changes + this repo's USB-C DisplayPort alt mode, built by `src/nootedgreen` (patches included) | [JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe](https://github.com/JulioNectar/Hackintosh-XPS13Plus-IrisXe-Tahoe), [sgiammori/NootedGreen](https://github.com/sgiammori/NootedGreen), [henriquejsza/VostroXe](https://github.com/henriquejsza/VostroXe) | Thou Shalt Not Profit 1.0 ([licenses/](licenses/NootedGreen-ThouShaltNotProfit-1.0.txt)): no commercial use |
 | `SSDT-PNLF.aml` | from the JulioNectar reference EFI | as above | |
+| S0ixStandby (`experimental/sleep` only) | 0.5.4 + this repo's patches (`experimental/sleep/patches/s0ixstandby-e16.diff`) | [labrouss/S0ixStandby](https://github.com/labrouss/S0ixStandby) | BSD-3-Clause |
+| `SSDT-DEEPIDLE.aml` (`experimental/sleep`) | from the S0ixStandby 0.5.4 release | as above | BSD-3-Clause |
+| `SSDT-GPRW.aml` (`experimental/sleep`) | Dortania's | [dortania/Getting-Started-With-ACPI](https://github.com/dortania/Getting-Started-With-ACPI) | see upstream |
 | SimpleHDA | 1.0.0 (**not included**, `tools/fetch-simplehda.sh`) | [laobamac/SimpleHDA](https://github.com/laobamac/SimpleHDA) | no license file; contains Apple's AppleHDA |
 
 **This repo:** `config.plist`, `config-install.plist`, `UTBMap.kext` (USBToolBox map for this
 laptop), `XHCI-unsupported-600.kext` (codeless, adds `0x51ed8086`), `SSDT-AWAC/PLUG-ALT/USBX/XOSI`
 (Dortania/acidanthera templates adapted to this DSDT), `BTIdle.kext` (source:
 [hackintosh-power-tools](https://github.com/keenerdavid18/hackintosh-power-tools/tree/main/macos/btidle)),
-`tools/timer-coalesce`, the build scripts and docs: MIT.
+`tools/timer-coalesce`, `tools/iphone-mirroring` (the `vtbgra` approach credits gianguyen14's airplayfix),
+`experimental/sleep` except the components listed above (SSDT-LIDWAKE, configs, tools), the build scripts and docs: MIT.
 `src/voodoogpio/build-voodoogpio.sh` is adapted from the JulioNectar project (TSNP 1.0).
 
 **Not included:** Apple software. The graphics install downloads and patches Apple's

@@ -8,8 +8,10 @@ patches:
 |---|---|---|
 | `0001-vostroxe-xe-hdmi13.diff` | The laptop's **HDMI port** (XE-HDMI13: pipe B, DPLL, DDC, TMDS light-up on display 13) | [henriquejsza/VostroXe](https://github.com/henriquejsza/VostroXe) (NootedGreen changes since `6f03560`) |
 | `0002-usbc-dp-alt-mode.diff` | **USB-C DisplayPort alt mode** (docks, USB-C monitors) on ADL-P/RPL-P with the TGL framebuffer, boot flag `-ngreentc1` | this repo |
+| `0003-deep-idle-sleep.diff` | **experimental, not in the main EFI:** Deep Idle sleep support for [experimental/sleep](../../experimental/sleep): skip `hwSaveNVRAM` (panic), `-ngreenfb0pm` (FB0 sleep/wake bookkeeping), `-ngreenedpwake` (eDP teardown before DC9 + modeset replay after wake), XE-WAKEBLANK, `-ngreennvmekeep` (test hook), a fix for the `xeLrcaRepair` use-after-free panic on display-mode changes | this repo |
 
-Build: `zsh src/nootedgreen/build.sh` (clones the reference, applies both, runs its `build-nootedgreen.sh`).
+Build: `zsh src/nootedgreen/build.sh` (clones the reference, applies 0001 and 0002, runs its `build-nootedgreen.sh`);
+`SLEEP=1 zsh src/nootedgreen/build.sh` also applies 0003.
 
 ## USB-C: what the patch does
 

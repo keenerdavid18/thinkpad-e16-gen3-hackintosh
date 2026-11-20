@@ -1,3 +1,5 @@
 EFI/OC/Kexts/SimpleHDA.kext/
 .DS_Store
 ._*
+experimental/sleep/tools/results/
+src/nootedgreen/build/
