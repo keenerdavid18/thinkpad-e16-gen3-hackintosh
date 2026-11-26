@@ -26,7 +26,7 @@ The CPU package stops at **PC3** (99 %): the NVMe drives set that floor under ma
 
 | Path | What it does |
 |---|---|
-| `EFI/OC/Kexts/S0ixStandby.kext` | labrouss/S0ixStandby 0.5.4 + this machine's patches ([patches/s0ixstandby-e16.diff](patches/s0ixstandby-e16.diff)): LPS0 `_DSM` around Deep Idle, power-button / keyboard wake, Type-C D3cold, NVMe handling, diagnostics |
+| `EFI/OC/Kexts/S0ixStandby.kext` | labrouss/S0ixStandby 0.5.4 + this machine's patches ([patches/s0ixstandby-e16.diff](patches/s0ixstandby-e16.diff)): LPS0 `_DSM` around Deep Idle, power-button / keyboard wake, Type-C D3cold, NVMe handling, diagnostics, and the HDA clock-gating and HPET comparator fixes from upstream 0.5.13 (brandonedley) |
 | `EFI/OC/Kexts/NootedGreen.kext` | **replaces** the main EFI's NootedGreen: same build plus [`src/nootedgreen/0003-deep-idle-sleep.diff`](../../src/nootedgreen/0003-deep-idle-sleep.diff) (no `hwSaveNVRAM` panic, FB0 sleep/wake bookkeeping, eDP relight after DC9, a fix for a `xeLrcaRepair` panic on display-mode changes) |
 | `EFI/OC/ACPI/SSDT-DEEPIDLE.aml` | `\_SB.LPS0` + Deep Idle support (from the S0ixStandby release) |
 | `EFI/OC/ACPI/SSDT-GPRW.aml` + ACPI patch `GPRW→XPRW` | stops the shared PCH PME GPE 0x6D (XDCI, LAN, audio, Wi-Fi, xHCI) from waking Deep Idle instantly (Dortania) |
@@ -36,7 +36,11 @@ The CPU package stops at **PC3** (99 %): the NVMe drives set that floor under ma
 | `EFI/OC/config-sleep-ac.plist` | the same with `SSDT-LIDWAKE2`, `-s0ixeclog -s0ixacnoec` (tested as "Yr", the overnight run) |
 | `acpi/` | `.dsl` sources; `make-ssdt-lidwake.py` builds both LIDWAKE tables |
 | `tools/sleep-power.sh` | one sleep, measured: battery drain, RAPL package/core/GT power, per-CPU residency, PMC and display registers awake vs during the halt |
-| `tools/nvme-modes.sh` | a batch of RTC-woken sleeps over the NVMe handling modes (`debug.s0ix.nvme`) |
+| `tools/nvme-modes.sh` | a batch of RTC-woken sleeps over the NVMe handling modes (`debug.s0ix.nvme`), with the NVMe root-port link state at the halt (`nvcfg.py`) |
+| `tools/skip-steps.sh` | one RTC-woken sleep per `debug.s0ix.skip` value: skips the LPS0 `_DSM`, TCSS D3cold, the refclk workaround or wake arming for that sleep |
+| `tools/pmtel.c` | reads the PUNIT package C-state counters (`pmtelemetry_cpu` IOReport group) or any other IOReport group; build: `clang -O2 -o pmtel pmtel.c -framework CoreFoundation -lIOReport`. Method from brandonedley (S0ixStandby #7) |
+| `tools/halt-diff.py`, `tools/pmtel-diff.py` | turn two `pmtel` snapshots (before / after a sleep) into per-counter rates during the halt, with the awake rate subtracted |
+| `tools/irqregs.py` | GPU / display / PCH-display interrupt registers awake vs at the halt (`sleep-power.sh` runs it) |
 | `linux/` | the Ubuntu scripts used to compare: `s0ix-test.sh`, `pc2-hunt.sh` (which device left in D0 blocks PC10), `nvme-state-test.sh`, `nvme-live-test.sh` |
 
 ### Sleep boot args (in both configs)
@@ -49,6 +53,8 @@ The CPU package stops at **PC3** (99 %): the NVMe drives set that floor under ma
 | `-s0ixnodpof` | S0ixStandby patch | clears the IOM "all monitors off" bit the LPS0 `_DSM` sets |
 | `-s0ixtcssd3` | S0ixStandby patch | Type-C subsystem to D3cold (`TCOF`/`TCON`); USB-C works after wake |
 | `-s0ixnvmed0` | S0ixStandby patch | NVMe back to D0 (controller shut down) for the halt: PC3 99 % instead of PC2 |
+| `-s0ixhdapm` | S0ixStandby (upstream 0.5.13) | restores the HDA controller's clock gating (`CGCTL` 0 → `0x003f01ff`) during the halt: AC ring oscillator off, ~1 W less package power in one run; audio works after wake |
+| `-s0ixhpetfix` | S0ixStandby (upstream 0.5.13) | moves the stopped HPET's comparators off the counter value; needed for SLP_S0 once the package reaches PC10 (not reached on the E16 yet) |
 | `-s0ixrefclk` | S0ixStandby patch | SOUTH_CHICKEN1 refclk workaround; no measurable effect, kept because it was tested that way |
 | `-s0ixacnoec` | S0ixStandby patch | AC config only: on AC, re-points the lid wake away from the EC so charge events stop dark-waking the Mac (lid-open wake on AC is given up). **The fixed build here is untested on AC** |
 | `-s0ixpmcdump`, `-ngreenedpdiag`, `-s0ixeclog` | | diagnostics only (ioreg dumps used by `sleep-power.sh`); safe to remove |

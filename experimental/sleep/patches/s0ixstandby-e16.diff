@@ -172,11 +172,38 @@ index 52435de..c1ecd85 100644
  | Wi-Fi after wake | AirportItlwm reconnects after every wake (it stops the firmware for sleep) |
  
  ## How it works
+diff --git a/S0ixStandby/S0ixGPU.cpp b/S0ixStandby/S0ixGPU.cpp
+index 70a3742..b8d196c 100644
+--- a/S0ixStandby/S0ixGPU.cpp
++++ b/S0ixStandby/S0ixGPU.cpp
+@@ -410,7 +410,7 @@ void S0ixStandby::gpuFormat(const GpuState &s, char *out, size_t size)
+ 	size_t n = snprintf(out, size, "D%u cmd=%x pmcsr=%x bar0=%x:%x%s", s.pmcsr & 3, s.cmd, s.pmcsr,
+ 	                    s.bar1, s.bar0, s.decodeEnabled ? " (decode was off, enabled for the read)" : "");
+ 	for (uint32_t i = 0; i < kGpuRegCount && n < size; i++)
+-		n += snprintf(out + n, size - n, " %s=%x", kGpuRegs[i].name, s.reg[i]);
++		snAdd(out, size, n, " %s=%x", kGpuRegs[i].name, s.reg[i]);
+ 	if (s.canary && n < size) snprintf(out + n, size - n, " (canary written)");
+ }
+ 
 diff --git a/S0ixStandby/S0ixStandby.cpp b/S0ixStandby/S0ixStandby.cpp
-index 70b6d13..06d1c36 100644
+index 70b6d13..1cc70fd 100644
 --- a/S0ixStandby/S0ixStandby.cpp
 +++ b/S0ixStandby/S0ixStandby.cpp
-@@ -157,6 +157,25 @@ static const uint32_t kActionPriority = 0x8000;
+@@ -29,6 +29,13 @@
+ //              -s0ixwifipm let IOPCIFamily put the Wi-Fi PCI function in D3 for
+ //                          sleep (enablePCIPowerManagement), with _PS3 and config
+ //                          restore on wake (experimental)
++//              -s0ixhdapm  restore Intel cAVS/HDA (00:1f.3) PCI CGCTL (0x48)
++//                          clock-gating bits (0x003F01FF) and PGCTL (0x44) across
++//                          Deep Idle, restoring saved values on wake (s0ixhdacg=N
++//                          overrides the CGCTL OR mask)
++//              -s0ixhpetfix  clear HPET comparators that equal the stopped main
++//                          counter (AppleHPET leaves them at 0), which keeps the
++//                          PMC from entering S0i2.0 / SLP_S0 (#11)
+ //              -s0ixgpuprobe  also probe an idle GPU (canary) and keep the last
+ //                          result in NVRAM (s0ix-gpu-last); for debugging
+ //              s0ixfn=N    bitmask of _DSM functions allowed to run, e.g.
+@@ -157,6 +164,25 @@ static const uint32_t kActionPriority = 0x8000;
  
  static const uint32_t kSleepTypeDeepIdle = 7;   // kIOPMSleepTypeDeepIdle
  static const uint16_t kPm1RtcEn = 1u << 10;      // PM1_EN.RTC_EN (ACPI fixed event)
@@ -202,7 +229,7 @@ index 70b6d13..06d1c36 100644
  static const uint8_t  kCmosAie  = 1u << 5;       // RTC register B: alarm interrupt enable
  static inline uint8_t cmosRead(uint8_t reg) { outb(0x70, reg); return inb(0x71); }
  static inline void cmosWrite(uint8_t reg, uint8_t v) { outb(0x70, reg); outb(0x71, v); }
-@@ -203,6 +222,117 @@ static inline uint64_t rdtsc()
+@@ -203,6 +229,155 @@ static inline uint64_t rdtsc()
  	return ((uint64_t)hi << 32) | lo;
  }
  
@@ -266,6 +293,11 @@ index 70b6d13..06d1c36 100644
 +static constexpr DispRange kDispRanges[] = {
 +	{0x44FE0, 0x45040}, {0x45270, 0x45280}, {0x45500, 0x45530}, {0x60000, 0x60080}, {0x61000, 0x61080},
 +	{0x70000, 0x70600}, {0x71000, 0x71600}, {0x72000, 0x72600}, {0x73000, 0x73600}, {0x101080, 0x101090},
++	// Interrupt sources (S0ixStandby #7: the IGPU vector fires ~23/s during the E16 halt): TBT/TC hotplug ctl,
++	// DISPLAY_INT_CTL, pipe A-D / DE port / DE misc / HPD ISR-IMR-IIR-IER, GU misc, PCH SDE ISR-IMR-IIR-IER +
++	// SHOTPLUG_CTL_DDI/TC, GT master + GT interrupt enables/masks (0x190000 block, read by the ISR without forcewake).
++	{0x44030, 0x44040}, {0x44200, 0x44210}, {0x44400, 0x44480}, {0x444F0, 0x44500}, {0xC4000, 0xC4040},
++	{0x190000, 0x190100},
 +};
 +static constexpr uint32_t dispRegCount() { uint32_t n = 0; for (auto &r : kDispRanges) n += (r.to - r.from) / 4; return n; }
 +static volatile uint8_t *gDispMMIO;      // set while the GPU BAR is mapped and in D0 with memory decode (checked at sleep)
@@ -298,12 +330,41 @@ index 70b6d13..06d1c36 100644
 +	IOLockUnlock(gCoreSnapLock);
 +	return err;
 +}
++// NVMe root ports + drives, full config space via ECAM: debug.s0ix.nvcfg = header (16 u32: slot count, halt valid,
++// active valid, sleep count, then the bus<<8|dev<<3|fn of each slot or 0xFFFFFFFF) + live + at the last quiesce
++// (root ports only: a config read to a drive would pull its link out of L1.2) + at the following active action,
++// each kNvCfgSlots x 1024 u32.
++static constexpr uint32_t kNvCfgSlots = 6;
++static volatile uint32_t *gNvCfg[kNvCfgSlots];
++static uint32_t gNvCfgBdf[kNvCfgSlots] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
++static uint32_t gNvCfgSnap[3][kNvCfgSlots][1024];   // [0] live (sysctl), [1] quiesce, [2] active
++static bool gNvCfgHaltValid, gNvCfgActiveValid;
++static uint32_t gNvCfgSleeps;
++static int nvCfgHandler(struct sysctl_oid *, void *, int, struct sysctl_req *req)
++{
++	if (req->newptr) return EPERM;
++	if (!gCoreSnapLock) return ENOENT;
++	IOLockLock(gCoreSnapLock);
++	uint32_t hdr[16] = {kNvCfgSlots, gNvCfgHaltValid, gNvCfgActiveValid, gNvCfgSleeps};
++	for (uint32_t s = 0; s < kNvCfgSlots; s++) {
++		hdr[4 + s] = gNvCfgBdf[s];
++		for (uint32_t i = 0; i < 1024; i++) gNvCfgSnap[0][s][i] = gNvCfg[s] ? gNvCfg[s][i] : 0xFFFFFFFF;
++	}
++	int err = SYSCTL_OUT(req, hdr, sizeof(hdr));
++	if (!err) err = SYSCTL_OUT(req, gNvCfgSnap, sizeof(gNvCfgSnap));
++	IOLockUnlock(gCoreSnapLock);
++	return err;
++}
 +// NVMe handling for the next Deep Idle, switchable at runtime: sudo sysctl debug.s0ix.nvme=<v>
 +//   v & 0xF: 0 = macOS default (drives in D3), 1 = D0 with the controller left shut down, 2 = D0 + live controller in
 +//   its deepest PS (I/O queue pair); 0x10 = mask MSI-X (function mask) during the halt (mode 2);
-+//   0x100 / 0x200 = live PS only for the drive on bus 4 / bus 5 (the other stays D0 shut down; neither = both).
++//   0x100 / 0x200 = live PS only for the drive on bus 4 / bus 5 (the other stays D0 shut down; neither = both);
++//   0x400 / 0x800 = leave the drive on bus 4 / bus 5 in macOS's D3 (its link idles there), the other per the mode.
 +//   Default from -s0ixnvmed0 / -s0ixnvmeps.
 +static int gNvmeCtl = 0;
++// Skip sleep-only steps for the next Deep Idle (subtraction test: which step costs PC6 vs awake idle):
++//   0x1 LPS0 _DSM entry/exit, 0x2 TCSS D3cold, 0x4 display refclk workaround, 0x8 wake arming (kbd, power button, lid pad).
++static int gSkip = 0;
 +SYSCTL_DECL(_debug);
 +SYSCTL_NODE(_debug, OID_AUTO, s0ix, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "S0ixStandby");
 +SYSCTL_PROC(_debug_s0ix, OID_AUTO, cores, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
@@ -311,16 +372,25 @@ index 70b6d13..06d1c36 100644
 +SYSCTL_PROC(_debug_s0ix, OID_AUTO, pmc, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
 +            pmcPageHandler, "S", "live PMC page (the LPIT counter's 4 KB MMIO page)");
 +SYSCTL_INT(_debug_s0ix, OID_AUTO, nvme, CTLFLAG_RW | CTLFLAG_LOCKED, &gNvmeCtl, 0,
-+           "NVMe Deep Idle mode: 0 D3 (macOS), 1 D0 shut down, 2 D0 live PS; +0x10 MSI-X masked; +0x100 bus 4 / +0x200 bus 5 only");
++           "NVMe Deep Idle mode: 0 D3 (macOS), 1 D0 shut down, 2 D0 live PS; +0x10 MSI-X masked; +0x100 bus 4 / +0x200 bus 5 only; +0x400 bus 4 / +0x800 bus 5 stay D3");
++SYSCTL_INT(_debug_s0ix, OID_AUTO, skip, CTLFLAG_RW | CTLFLAG_LOCKED, &gSkip, 0,
++           "skip for the next Deep Idle: 0x1 LPS0 DSM, 0x2 TCSS D3cold, 0x4 refclk WA, 0x8 wake arming");
 +SYSCTL_PROC(_debug_s0ix, OID_AUTO, disp, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
 +            dispHandler, "S", "live display registers");
 +SYSCTL_PROC(_debug_s0ix, OID_AUTO, disphalt, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, (void *)1, 0,
 +            dispHandler, "S", "display registers at the last Deep Idle quiesce");
++SYSCTL_PROC(_debug_s0ix, OID_AUTO, nvcfg, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, nullptr, 0,
++            nvCfgHandler, "S", "NVMe root port + drive config space: live, at the last quiesce, after it");
 +
  // C-state residency MSRs (Intel SDM vol. 4). All count at TSC rate.
  struct CState { const char *name; uint32_t msr; };
  static const CState kCStates[] = {
-@@ -308,6 +438,19 @@ bool S0ixStandby::start(IOService *provider)
+@@ -305,9 +480,24 @@ bool S0ixStandby::start(IOService *provider)
+ 	gpuReset = !bootArg("-s0ixnogpureset");
+ 	gpuResetForced = bootArg("-s0ixgpureset");
+ 	wifiPM = bootArg("-s0ixwifipm");
++	hdaCgMask = bootArg("-s0ixhdapm") ? 0x003F01FFu : 0u;
++	{ uint32_t m = 0; if (PE_parse_boot_argn("s0ixhdacg", &m, sizeof(m))) hdaCgMask = m; }
  	refclkWA = bootArg("-s0ixrefclk");
  	acNoRtc = bootArg("-s0ixacnortc");
  	ecWake = bootArg("-s0ixecwake");
@@ -340,7 +410,15 @@ index 70b6d13..06d1c36 100644
  	uint32_t fn = 0;
  	if (PE_parse_boot_argn("s0ixfn", &fn, sizeof(fn)))
  		fnAllow = fn;
-@@ -396,8 +539,10 @@ bool S0ixStandby::start(IOService *provider)
+@@ -338,6 +528,7 @@ bool S0ixStandby::start(IOService *provider)
+ 		LOG("no supported LPS0 _DSM found on %s; meter only", lps0->getName());
+ 
+ 	bool meter = setupMeter();
++	setupHpetFix();
+ 	if (!meter)
+ 		LOG("no usable LPIT SLP_S0 counter; residency will not be reported");
+ 	if (pmcDump && counterPage) {
+@@ -396,8 +587,10 @@ bool S0ixStandby::start(IOService *provider)
  		setProperty("Wi-Fi PCI PM", "pending (set up 30 s after boot)");
  	}
  
@@ -353,7 +431,7 @@ index 70b6d13..06d1c36 100644
  			acTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::acTimerFired);
  			if (acTimer && workLoop->addEventSource(acTimer) != kIOReturnSuccess)
  				OSSafeReleaseNULL(acTimer);
-@@ -408,6 +553,8 @@ bool S0ixStandby::start(IOService *provider)
+@@ -408,6 +601,8 @@ bool S0ixStandby::start(IOService *provider)
  	}
  
  	setupWakeInfo();
@@ -362,7 +440,7 @@ index 70b6d13..06d1c36 100644
  
  	if (workLoop) {
  		battTimer = IOTimerEventSource::timerEventSource(this, &S0ixStandby::battTimerFired);
-@@ -454,12 +601,32 @@ bool S0ixStandby::start(IOService *provider)
+@@ -454,12 +649,39 @@ bool S0ixStandby::start(IOService *provider)
  	LOG("started on %s (Intel 0x%x, Microsoft 0x%x, AMD 0x%x, dsm %s)",
  	    lps0->getName(), dsmMask[kIntel], dsmMask[kMicrosoft], dsmMask[kAMD],
  	    dsmEnabled ? "on" : "off");
@@ -372,8 +450,10 @@ index 70b6d13..06d1c36 100644
 +		sysctl_register_oid(&sysctl__debug_s0ix_cores);
 +		sysctl_register_oid(&sysctl__debug_s0ix_pmc);
 +		sysctl_register_oid(&sysctl__debug_s0ix_nvme);
++		sysctl_register_oid(&sysctl__debug_s0ix_skip);
 +		sysctl_register_oid(&sysctl__debug_s0ix_disp);
 +		sysctl_register_oid(&sysctl__debug_s0ix_disphalt);
++		sysctl_register_oid(&sysctl__debug_s0ix_nvcfg);
 +		gPmcPage = counterPage;
 +	}
  	publishLog();
@@ -385,8 +465,13 @@ index 70b6d13..06d1c36 100644
 +	if (gCoreSnapLock) {
 +		gPmcPage = nullptr;
 +		gDispMMIO = nullptr;
++		IOLockLock(gCoreSnapLock);
++		for (uint32_t s = 0; s < kNvCfgSlots; s++) gNvCfg[s] = nullptr;
++		IOLockUnlock(gCoreSnapLock);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_nvcfg);
 +		sysctl_unregister_oid(&sysctl__debug_s0ix_disphalt);
 +		sysctl_unregister_oid(&sysctl__debug_s0ix_disp);
++		sysctl_unregister_oid(&sysctl__debug_s0ix_skip);
 +		sysctl_unregister_oid(&sysctl__debug_s0ix_nvme);
 +		sysctl_unregister_oid(&sysctl__debug_s0ix_pmc);
 +		sysctl_unregister_oid(&sysctl__debug_s0ix_cores);
@@ -395,7 +480,119 @@ index 70b6d13..06d1c36 100644
  	if (publishTimer) {
  		publishTimer->cancelTimeout();
  		if (workLoop) workLoop->removeEventSource(publishTimer);
-@@ -1008,15 +1175,79 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+@@ -503,6 +725,7 @@ void S0ixStandby::free()
+ 	OSSafeReleaseNULL(gpuTimer);
+ 	OSSafeReleaseNULL(wifiTimer);
+ 	OSSafeReleaseNULL(wifiDev);
++	OSSafeReleaseNULL(hdaDev);
+ 	OSSafeReleaseNULL(acTimer);
+ 	OSSafeReleaseNULL(battTimer);
+ 	OSSafeReleaseNULL(workLoop);
+@@ -515,6 +738,9 @@ void S0ixStandby::free()
+ 	counter = nullptr;
+ 	counterPage = nullptr;
+ 	OSSafeReleaseNULL(counterMap);
++	for (uint32_t i = 0; i < kNvMax; i++) OSSafeReleaseNULL(nvCfgMap[i]);   // gNvCfg cleared above (under the lock)
++	hpetReg = nullptr;
++	OSSafeReleaseNULL(hpetMap);
+ 	OSSafeReleaseNULL(lps0);
+ 	OSSafeReleaseNULL(ipNames);
+ 	OSSafeReleaseNULL(ipIgnore);
+@@ -803,7 +1029,7 @@ OSArray *S0ixStandby::blockerNames(const uint8_t *b, char *line, size_t lineSize
+ 			continue;
+ 		if (blockers) blockers->setObject(name);
+ 		if (n < lineSize)
+-			n += snprintf(line + n, lineSize - n, " %s", name->getCStringNoCopy());
++			snAdd(line, lineSize, n, " %s", name->getCStringNoCopy());
+ 	}
+ 	return blockers;
+ }
+@@ -844,7 +1070,7 @@ void S0ixStandby::publishBlockers()
+ 	}
+ 	char raw[80]; size_t r = 0; raw[0] = 0;
+ 	for (uint32_t i = 0; i < gatingBytes && r < sizeof(raw); i++)
+-		r += snprintf(raw + r, sizeof(raw) - r, "%02x", b[i]);
++		snAdd(raw, sizeof(raw), r, "%02x", b[i]);
+ 	setProperty("Last gating status at halt", raw);
+ 	LOG("IPs still powered at the Deep Idle halt (likely S0ix blockers):%s", n ? line : " none");
+ }
+@@ -981,6 +1207,75 @@ void S0ixStandby::d3Enter()
+ 	IOLockUnlock(d3Lock);
+ }
+ 
++void S0ixStandby::setupHdaPM()
++{
++	if (!hdaCgMask) return;
++	if (!hdaDev) {
++		OSDictionary *match = serviceMatching("IOPCIDevice");
++		OSIterator *it = match ? getMatchingServices(match) : nullptr;
++		OSSafeReleaseNULL(match);
++		if (!it) return;
++		while (OSObject *o = it->getNextObject()) {
++			IOPCIDevice *dev = OSDynamicCast(IOPCIDevice, o);
++			if (!dev || dev->getBusNumber() != 0 || dev->getDeviceNumber() != 0x1f || dev->getFunctionNumber() != 3)
++				continue;
++			uint32_t id = dev->configRead32(kIOPCIConfigVendorID);
++			uint32_t cls = dev->configRead32(kIOPCIConfigClassCode) >> 16;
++			if ((id & 0xFFFF) != 0x8086 || (cls != 0x0403 && cls != 0x0401))
++				continue;
++			UInt8 pm = 0;
++			if (!dev->findPCICapability(kIOPCIPowerManagementCapability, &pm) || !pm)
++				continue;
++			dev->retain();
++			hdaDev = dev;
++			hdaPmCap = pm;
++			hdaDid = (uint16_t)(id >> 16);
++			break;
++		}
++		it->release();
++		if (!hdaDev) {
++			setProperty("HDA PCI PM", "no Intel HDA function at 00:1f.3 found");
++			return;
++		}
++	}
++	char buf[128];
++	snprintf(buf, sizeof(buf), "00:1f.3 8086:%04x: on (-s0ixhdapm, CGCTL mask 0x%08x), PGCTL 0x%08x, CGCTL 0x%08x",
++	         hdaDid, hdaCgMask, hdaDev->configRead32(0x44), hdaDev->configRead32(0x48));
++	setProperty("HDA PCI PM", buf);
++}
++
++void S0ixStandby::hdaSleep()
++{
++	hdaTouched = false;
++	hdaSleepValid = false;
++	if (!hdaCgMask || !hdaDev || !hdaPmCap) return;
++	hdaPmSleep = hdaDev->configRead16(hdaPmCap + 4);
++	if (hdaPmSleep == 0xFFFF) return;
++	hdaPgSaved = hdaPgAfter = hdaDev->configRead32(0x44);
++	hdaCgSaved = hdaCgAfter = hdaDev->configRead32(0x48);
++	// PCI config space remains writable in D3hot: clear PGCTL.ADSPPGD (b2),
++	// set PGCTL.LSRMD (b4), and restore Intel PCH CGCTL clock-gating bits.
++	const uint32_t wantPg = (hdaPgSaved & ~(1u << 2)) | (1u << 4);
++	const uint32_t wantCg = hdaCgSaved | hdaCgMask;
++	if (wantPg != hdaPgSaved) hdaDev->configWrite32(0x44, wantPg);
++	if (wantCg != hdaCgSaved) hdaDev->configWrite32(0x48, wantCg);
++	hdaPgAfter = hdaDev->configRead32(0x44);
++	hdaCgAfter = hdaDev->configRead32(0x48);
++	hdaTouched = (hdaPgAfter != hdaPgSaved || hdaCgAfter != hdaCgSaved);
++	hdaSleepValid = true;
++}
++
++void S0ixStandby::hdaWake()
++{
++	if (!hdaDev || !hdaPmCap) return;
++	if (hdaTouched) {
++		hdaDev->configWrite32(0x44, hdaPgSaved);
++		hdaDev->configWrite32(0x48, hdaCgSaved);
++		hdaTouched = false;
++	}
++	hdaPmWake = hdaDev->configRead16(hdaPmCap + 4);
++}
++
+ 
+ // ---------------------------------------------------------------------------
+ // Sleep / wake
+@@ -1008,15 +1303,79 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
  		// Interrupts are disabled in these two: MSR reads only, no locks/logging.
  		if (functionName->isEqualTo("IOPlatformQuiesceAction")) {
  			if (rtcBlocked) outw(pm1EnPort, (uint16_t)(inw(pm1EnPort) & ~kPm1RtcEn));
@@ -479,7 +676,23 @@ index 70b6d13..06d1c36 100644
  			if (cstateMask) { readHalt(haltAtQuiesce); tscAtQuiesce = rdtsc(); haltValid = false; }
  			if (pmcDump && counterPage) {
  				for (uint32_t i = 0; i < 1024; i++) pmcAtHalt[i] = counterPage[i];
-@@ -1035,14 +1266,61 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+@@ -1026,6 +1385,15 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+ 				for (uint32_t i = 0; i < (gatingBytes + 3) / 4; i++) gatingAtHalt[i] = gatingPtr[i];
+ 				gatingValid = true;
+ 			}
++			if (lastSleepType == kSleepTypeDeepIdle) {
++				bool any = false;
++				for (uint32_t s = 0; s < kNvCfgSlots; s++)          // root ports only (bus 0): no config cycle reaches a link
++					if (gNvCfg[s] && (gNvCfgBdf[s] >> 8) == 0) {
++						for (uint32_t i = 0; i < 1024; i++) gNvCfgSnap[1][s][i] = gNvCfg[s][i];
++						any = true;
++					}
++				gNvCfgHaltValid = any; gNvCfgActiveValid = false;
++			}
+ 			return kIOReturnSuccess;
+ 		}
+ 		if (functionName->isEqualTo("IOPlatformActiveAction")) {
+@@ -1035,14 +1403,70 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
  			if (gpe0StsPort) {
  				// What woke the CPU: status bits are still set here (cleared later by ACPI).
  				pm1StsAtWake = pm1StsPort ? inw(pm1StsPort) : 0;
@@ -527,6 +740,15 @@ index 70b6d13..06d1c36 100644
 +					if (kbRteUnmasked && ioapic) { ioapic[0] = 0x12; ioapic[4] = kbRteLow; kbRteUnmasked = false; }
 +					if (kbArmResult == 1 && (kbStsAtWake & 0x21) == 0x01) kbWoke = true;   // keyboard byte waiting
 +				}
++			}
++			if (gNvCfgHaltValid && !gNvCfgActiveValid) {
++				for (uint32_t s = 0; s < kNvCfgSlots; s++)          // root ports first, then the drives
++					if (gNvCfg[s] && (gNvCfgBdf[s] >> 8) == 0)
++						for (uint32_t i = 0; i < 1024; i++) gNvCfgSnap[2][s][i] = gNvCfg[s][i];
++				for (uint32_t s = 0; s < kNvCfgSlots; s++)
++					if (gNvCfg[s] && (gNvCfgBdf[s] >> 8) != 0)
++						for (uint32_t i = 0; i < 1024; i++) gNvCfgSnap[2][s][i] = gNvCfg[s][i];
++				gNvCfgActiveValid = true; gNvCfgSleeps++;
  			}
  			if (pmcDump && counterPage && pmcHaltValid) {
  				for (uint32_t i = 0; i < 1024; i++) pmcAtActive[i] = counterPage[i];
@@ -541,7 +763,125 @@ index 70b6d13..06d1c36 100644
  			return kIOReturnSuccess;
  		}
  	}
-@@ -1117,6 +1395,21 @@ void S0ixStandby::setupWakeInfo()
+@@ -1059,6 +1483,117 @@ IOReturn S0ixStandby::callPlatformFunction(const OSSymbol *functionName, bool wa
+ // restoring it first thing at wake, lets the alarm be programmed but never
+ // wake the machine; power button, lid and other GPEs are unaffected.
+ 
++// ---------------------------------------------------------------------------
++// HPET standing comparator-match fix (Intel PCH S0i2.0 / SLP_S0)
++// ---------------------------------------------------------------------------
++// On macOS, AppleHPET disables the HPET (GEN_CONF bit 0 = 0), zeroes MAIN_CNT
++// (0xF0), and leaves timer comparators T0..T3 (0x108/0x128/0x148/0x168) at 0
++// with INT_ENB_CNF = 0. On Alder Lake-P (and likely Tiger Lake / Raptor Lake),
++// that standing MAIN_CNT == CMP == 0 match holds PWRM+0x1C6C bit 19 low and
++// stalls the PMC in the pre-S0i2.0 wait (PWRM+0x140C) even at PC10 = 99%.
++// Setting any matching disabled comparator to 0xFFFFFFFF (matching Linux's
++// unused comparators) while leaving GEN_CONF and MAIN_CNT untouched clears it.
++
++uint32_t S0ixStandby::hpetClearMatches(uint32_t *outMask, bool write)
++{
++	if (outMask) *outMask = 0;
++	if (!hpetReg) return 0;
++	uint32_t gcap = hpetReg[0];
++	uint32_t ntim = ((gcap >> 8) & 0x1Fu) + 1u;
++	if (ntim > 32u) ntim = 32u;
++	uint32_t conf = hpetReg[0x10 / 4];
++	if (conf & 1u) return 0; // HPET running; do not touch active timers
++	uint32_t cntLo = hpetReg[0xF0 / 4];
++	uint32_t cntHi = hpetReg[0xF4 / 4];
++	uint32_t repl  = (cntLo == 0xFFFFFFFFu) ? 0xFFFFFFFEu : 0xFFFFFFFFu;
++	uint32_t fixed = 0, mask = 0;
++	for (uint32_t t = 0; t < ntim; t++) {
++		uint32_t base = (0x100u + t * 0x20u) / 4u;
++		if ((base + 3u) >= 256u) break;
++		uint32_t cfg = hpetReg[base];
++		if (cfg & (1u << 2)) continue; // INT_ENB_CNF set; leave enabled timer alone
++		bool is64 = ((cfg & (1u << 5)) != 0) && ((cfg & (1u << 8)) == 0);
++		uint32_t cmpLo = hpetReg[base + 2u];
++		uint32_t cmpHi = is64 ? hpetReg[base + 3u] : 0u;
++		if (cmpLo == cntLo && (!is64 || cmpHi == cntHi)) {
++			mask |= (1u << t);
++			if (!write) continue;
++			hpetReg[base + 2u] = repl;
++			if (is64) hpetReg[base + 3u] = 0xFFFFFFFFu;
++			fixed++;
++		}
++	}
++	if (fixed) {
++		OSSynchronizeIO();
++		hpetFixCount += fixed;
++		hpetFixMask |= mask;
++	}
++	if (outMask) *outMask = mask;
++	return fixed;
++}
++
++void S0ixStandby::setupHpetFix()
++{
++	// Opt-in while it is confirmed on more platforms (verified on ADL-P,
++	// brandonedley, #11). Without the boot-arg the HPET is only read, so
++	// s0ix-status.sh shows whether the standing match is there.
++	hpetFixEnabled = bootArg("-s0ixhpetfix") && !bootArg("-s0ixnohpetfix");
++	uint64_t addr = 0;
++	const OSData *tbl = nullptr;
++	if (IOACPIPlatformExpert *acpi = OSDynamicCast(IOACPIPlatformExpert, getPlatform()))
++		tbl = ACPITableAccess::get(acpi, "HPET", 0);
++	if (!tbl && getPlatform())
++		if (OSDictionary *tables = OSDynamicCast(OSDictionary, getPlatform()->getProperty("ACPI Tables")))
++			tbl = OSDynamicCast(OSData, tables->getObject("HPET"));
++	if (tbl && tbl->getLength() >= 52) {
++		const uint8_t *p = static_cast<const uint8_t *>(tbl->getBytesNoCopy());
++		if (p[40] == 0) addr = OSReadLittleInt64(p, 44); // ACPI GAS: SystemMemory
++	}
++	if (!addr) addr = 0xFED00000ULL;
++	if (IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(addr, 0x1000, kIODirectionInOut)) {
++		hpetMap = md->map(kIOMapInhibitCache);
++		md->release();
++		if (hpetMap) {
++			hpetReg = reinterpret_cast<volatile uint32_t *>(hpetMap->getVirtualAddress());
++			uint32_t cap0 = hpetReg[0], cap1 = hpetReg[1];
++			if (cap0 == 0xFFFFFFFFu || cap1 == 0xFFFFFFFFu || (cap0 & 0xFFu) == 0) {
++				hpetReg = nullptr;
++				OSSafeReleaseNULL(hpetMap);
++			}
++		}
++	}
++	if (!hpetReg) {
++		setProperty("HPET comparator fix", "unavailable (no valid HPET MMIO)");
++		return;
++	}
++	hpetAddr = addr;
++	uint32_t mask = 0;
++	hpetClearMatches(&mask, hpetFixEnabled);
++	publishHpet(mask);
++	LOG("HPET at 0x%llx: CONF 0x%x, CNT 0x%x, standing match mask 0x%x, fix %s",
++	    (unsigned long long)hpetAddr, hpetReg[0x10 / 4], hpetReg[0xF0 / 4], mask, hpetFixEnabled ? "on" : "off");
++}
++
++// "HPET comparator fix": the HPET state now and what the fix has done.
++// mask = disabled timers whose comparator equals the stopped main counter.
++void S0ixStandby::publishHpet(uint32_t mask)
++{
++	if (!hpetReg) return;
++	uint32_t conf = hpetReg[0x10 / 4], cnt = hpetReg[0xF0 / 4];
++	char buf[240];
++	if (hpetFixEnabled)
++		snprintf(buf, sizeof(buf), "on (-s0ixhpetfix): HPET 0x%llx CONF 0x%x CNT 0x%x; cleared %u comparator(s) so far (timers 0x%x)",
++		         (unsigned long long)hpetAddr, conf, cnt, hpetFixCount, hpetFixMask);
++	else if (conf & 1u)
++		snprintf(buf, sizeof(buf), "off: HPET 0x%llx running (CONF 0x%x), no standing match", (unsigned long long)hpetAddr, conf);
++	else if (mask)
++		snprintf(buf, sizeof(buf), "off: HPET 0x%llx stopped (CONF 0x%x, CNT 0x%x) with comparator == counter on timers 0x%x; "
++		         "this can keep SLP_S0 at 0 (see -s0ixhpetfix)", (unsigned long long)hpetAddr, conf, cnt, mask);
++	else
++		snprintf(buf, sizeof(buf), "off: HPET 0x%llx stopped (CONF 0x%x, CNT 0x%x), no standing match", (unsigned long long)hpetAddr, conf, cnt);
++	setProperty("HPET comparator fix", buf);
++}
++
+ bool S0ixStandby::setupRtcBlock()
+ {
+ 	const OSData *fadt = nullptr;
+@@ -1117,6 +1652,21 @@ void S0ixStandby::setupWakeInfo()
  	if (len >= 232 && f[220] == 1 && OSReadLittleInt64(f, 224))   // X_GPE0_BLK, SystemIO
  		gpe = OSReadLittleInt64(f, 224);
  	if (pm1 && pm1 < 0xFFFF) pm1StsPort = (uint16_t)pm1;
@@ -563,7 +903,7 @@ index 70b6d13..06d1c36 100644
  	if (gpe && gpe + gpeLen <= 0xFFFF && gpeLen >= 2 && !(gpeLen & 1)) {
  		gpe0StsPort = (uint16_t)gpe;
  		gpe0Half = gpeLen / 2;
-@@ -1131,6 +1424,663 @@ void S0ixStandby::setupWakeInfo()
+@@ -1131,6 +1681,708 @@ void S0ixStandby::setupWakeInfo()
  // The EC's GPE number: s0ixecgpe=N overrides; otherwise _GPE of the PNP0C09
  // device, searched in the ACPI plane (the EC nub isn't always registered yet,
  // or at all). An integer is a GPE0 bit; a package means a GPE block device.
@@ -616,17 +956,19 @@ index 70b6d13..06d1c36 100644
 +			uint8_t pm = 0;
 +			uint32_t ps = 0xFF;
 +			if (d->findPCICapability(kIOPCIPowerManagementCapability, &pm) && pm) ps = d->configRead16(pm + 4) & 3;
-+			n += snprintf(pci + n, sizeof(pci) - n, "%s%x.%x D%u", n ? ", " : "", w[0], w[1], ps);
++			snAdd(pci, sizeof(pci), n, "%s%x.%x D%u", n ? ", " : "", w[0], w[1], ps);
 +			if (w[0] == 0x0d && w[1] == 0) {
 +				if (!txhcDev) { d->retain(); txhcDev = d; txhcPm = pm; }
 +				if (!txhcMap) txhcMap = d->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache);
 +				if (txhcMap && ps == 0) {
 +					volatile uint8_t *b = reinterpret_cast<volatile uint8_t *>(txhcMap->getVirtualAddress());
-+					uint32_t capLen = b[0], maxPorts = (*reinterpret_cast<volatile uint32_t *>(b + 4)) >> 24;
++					uint32_t hcs1 = *reinterpret_cast<volatile uint32_t *>(b + 4), capLen = b[0], maxPorts = hcs1 >> 24;
++					// a dark wake can read the controller as all ones (not back yet): no garbage port dump
++					if (hcs1 == 0xFFFFFFFF || capLen < 0x10 || capLen == 0xFF) { snprintf(ports, sizeof(ports), "controller not readable"); maxPorts = 0; }
 +					for (uint32_t p = 0; p < maxPorts && p < 16; p++) {
 +						uint32_t sc = *reinterpret_cast<volatile uint32_t *>(b + capLen + 0x400 + 0x10 * p);
 +						// CCS b0, PED b1, PR b4, PLS b8:5, PP b9, speed b13:10
-+						pn += snprintf(ports + pn, sizeof(ports) - pn, "%sP%u %08x(ccs%u ped%u pls%u pp%u spd%u)", pn ? " " : "",
++						snAdd(ports, sizeof(ports), pn, "%sP%u %08x(ccs%u ped%u pls%u pp%u spd%u)", pn ? " " : "",
 +						               p + 1, sc, sc & 1, (sc >> 1) & 1, (sc >> 5) & 0xF, (sc >> 9) & 1, (sc >> 10) & 0xF);
 +					}
 +				} else if (ps != 0) {
@@ -707,14 +1049,15 @@ index 70b6d13..06d1c36 100644
 +	}
 +	if (me->nvN) {
 +		char t[300]; size_t n = 0;
-+		n += snprintf(t + n, sizeof(t) - n, "mode 0x%x (%s), %u sleeps:", me->nvMode, (me->nvMode & 0xF) == 2 ? "D0 live PS" : (me->nvMode & 0xF) == 1 ? "D0 shut down" : "macOS D3", me->nvCount);
++		snAdd(t, sizeof(t), n, "mode 0x%x (%s), %u sleeps:", me->nvMode, (me->nvMode & 0xF) == 2 ? "D0 live PS" : (me->nvMode & 0xF) == 1 ? "D0 shut down" : "macOS D3", me->nvCount);
 +		for (uint32_t i = 0; i < me->nvN && n < sizeof(t) - 40; i++)
-+			n += snprintf(t + n, sizeof(t) - n, " %02x:%02x.%x D%u%s", me->nvDev[i]->getBusNumber(), me->nvDev[i]->getDeviceNumber(),
++			snAdd(t, sizeof(t), n, " %02x:%02x.%x D%u%s", me->nvDev[i]->getBusNumber(), me->nvDev[i]->getDeviceNumber(),
 +			              me->nvDev[i]->getFunctionNumber(), me->nvSaved[i] & 3, me->nvChanged[i] ? (me->nvAfter[i] & 3) == 0 ? "->D0" : "->D0 FAILED" : "");
 +		me->setProperty("NVMe at last sleep", t);
++
 +		char l[600]; size_t m = 0;
 +		for (uint32_t i = 0; i < me->nvN && m < sizeof(l) - 120; i++)
-+			m += snprintf(l + m, sizeof(l) - m, "%s%02x:%02x.%x lnkctl %x/%x/%x devctl2 %x/%x/%x l1ss %x/%x/%x ltr %x/%x/%x", m ? "; " : "",
++			snAdd(l, sizeof(l), m, "%s%02x:%02x.%x lnkctl %x/%x/%x devctl2 %x/%x/%x l1ss %x/%x/%x ltr %x/%x/%x", m ? "; " : "",
 +			              me->nvDev[i]->getBusNumber(), me->nvDev[i]->getDeviceNumber(), me->nvDev[i]->getFunctionNumber(),
 +			              me->nvLnk[i][0], me->nvLnk[i][1], me->nvLnk[i][2], me->nvDc2[i][0], me->nvDc2[i][1], me->nvDc2[i][2],
 +			              me->nvSs1[i][0], me->nvSs1[i][1], me->nvSs1[i][2], me->nvLtrV[i][0], me->nvLtrV[i][1], me->nvLtrV[i][2]);
@@ -722,7 +1065,7 @@ index 70b6d13..06d1c36 100644
 +		if ((me->nvMode & 0xF) == 2) {
 +			char q[400]; size_t k = 0;
 +			for (uint32_t i = 0; i < me->nvN && k < sizeof(q) - 100; i++)
-+				if (me->nvPsInfo[i][0]) k += snprintf(q + k, sizeof(q) - k, "%s%02x:00.0 %s", k ? "; " : "", me->nvDev[i]->getBusNumber(), me->nvPsInfo[i]);
++				if (me->nvPsInfo[i][0]) snAdd(q, sizeof(q), k, "%s%02x:00.0 %s", k ? "; " : "", me->nvDev[i]->getBusNumber(), me->nvPsInfo[i]);
 +			me->setProperty("NVMe power state at last sleep", k ? q : "not attempted");
 +		}
 +	}
@@ -749,6 +1092,46 @@ index 70b6d13..06d1c36 100644
 +// told the display is off (DPOF or DC9). Only with nothing attached to USB-C (never sleep docked).
 +// Called from the 60 s timer (normal thread context, system awake): find the devices and, for -s0ixnvmeps, allocate the
 +// admin-queue DMA buffers and map BAR0 now - not in the sleep action.
++// ECAM base from the host bridge's PCIEXBAR (00:00.0 0x60, bit 0 enable, bits 3:1 length: 0 = 256 MB, 1 = 128 MB,
++// 2 = 64 MB, 3 = 512 MB, 4 = 1 GB, 5 = 2 GB, 6 = 4 GB). Each mapping is checked against IOPCIFamily's vendor/device read.
++void S0ixStandby::nvCfgMapAll()
++{
++	nvCfgTried = true;
++	OSDictionary *match = serviceMatching("IOPCIDevice");
++	OSIterator *it = match ? getMatchingServices(match) : nullptr;
++	OSSafeReleaseNULL(match);
++	uint64_t bar = 0;
++	while (it && !bar)
++		if (IOPCIDevice *d = OSDynamicCast(IOPCIDevice, it->getNextObject())) {
++			if (d->getBusNumber() == 0 && d->getDeviceNumber() == 0 && d->getFunctionNumber() == 0)
++				bar = ((uint64_t)d->configRead32(0x64) << 32) | d->configRead32(0x60);
++		} else break;
++	OSSafeReleaseNULL(it);
++	char buf[200];
++	if (!(bar & 1)) { snprintf(buf, sizeof(buf), "PCIEXBAR 0x%llx not enabled", (unsigned long long)bar); setProperty("NVMe config snapshot", buf); return; }
++	static const uint64_t kLen[8] = {256, 128, 64, 512, 1024, 2048, 4096, 256};
++	uint64_t base = bar & ~((kLen[(bar >> 1) & 7] << 20) - 1) & 0x3FFFFFFFFFFULL;
++	size_t k = 0;
++	snAdd(buf, sizeof(buf), k, "ECAM 0x%llx:", (unsigned long long)base);
++	for (uint32_t i = 0; i < nvN && i < kNvCfgSlots; i++) {
++		IOPCIDevice *d = nvDev[i];
++		uint64_t a = base + ((uint64_t)d->getBusNumber() << 20) + ((uint64_t)d->getDeviceNumber() << 15) + ((uint64_t)d->getFunctionNumber() << 12);
++		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(a, 0x1000, kIODirectionIn);
++		IOMemoryMap *m = md ? md->map(kIOMapInhibitCache | kIOMapReadOnly) : nullptr;
++		OSSafeReleaseNULL(md);
++		volatile uint32_t *p = m ? reinterpret_cast<volatile uint32_t *>(m->getVirtualAddress()) : nullptr;
++		bool ok = p && p[0] == d->configRead32(kIOPCIConfigVendorID) && p[0] != 0xFFFFFFFF;
++		snAdd(buf, sizeof(buf), k, " %02x:%02x.%x %s", d->getBusNumber(), d->getDeviceNumber(), d->getFunctionNumber(), ok ? "ok" : "MISMATCH");
++		if (!ok) { OSSafeReleaseNULL(m); continue; }
++		nvCfgMap[i] = m;
++		uint32_t bdf = ((uint32_t)d->getBusNumber() << 8) | ((uint32_t)d->getDeviceNumber() << 3) | d->getFunctionNumber();
++		if (gCoreSnapLock) IOLockLock(gCoreSnapLock);
++		gNvCfgBdf[i] = bdf; gNvCfg[i] = p;
++		if (gCoreSnapLock) IOLockUnlock(gCoreSnapLock);
++	}
++	setProperty("NVMe config snapshot", buf);
++}
++
 +void S0ixStandby::nvmePrep()
 +{
 +	if (!nvN) {   // root ports 00:06.x first (parents), then the NVMe endpoints (class 01:08:02)
@@ -775,6 +1158,7 @@ index 70b6d13..06d1c36 100644
 +			o = 0; if (nvDev[i]->extendedFindPCICapability(kIOPCIExpressCapabilityIDLatencyTolerenceReporting, &o)) nvLtr[i] = (uint16_t)o;
 +		}
 +	}
++	if (prepAlloc && !nvCfgTried) nvCfgMapAll();
 +	if (!prepAlloc) return;
 +	for (uint32_t i = 0; i < nvN; i++) {
 +		if ((nvDev[i]->configRead32(kIOPCIConfigRevisionID) >> 8) != 0x010802) continue;
@@ -816,7 +1200,8 @@ index 70b6d13..06d1c36 100644
 +		const bool isEp = (d->configRead32(kIOPCIConfigRevisionID) >> 8) == 0x010802;
 +		const uint32_t sel = nvMode & 0x300, bus = d->getBusNumber();
 +		const bool picked = !isEp || !sel || (bus == 4 && (sel & 0x100)) || (bus == 5 && (sel & 0x200));
-+		if ((nvMode & 0xF) >= 1 && nvPm[i] && (nvSaved[i] & 3) && nvSaved[i] != 0xFFFF) {   // D0: every drive
++		const bool keepD3 = isEp && ((bus == 4 && (nvMode & 0x400)) || (bus == 5 && (nvMode & 0x800)));
++		if ((nvMode & 0xF) >= 1 && !keepD3 && nvPm[i] && (nvSaved[i] & 3) && nvSaved[i] != 0xFFFF) {   // D0: every drive but keepD3
 +			d->configWrite16(nvPm[i] + 4, (uint16_t)(nvSaved[i] & ~3));
 +			IODelay(10000);                                   // D3hot -> D0: 10 ms
 +			nvAfter[i] = d->configRead16(nvPm[i] + 4);
@@ -1227,7 +1612,7 @@ index 70b6d13..06d1c36 100644
  void S0ixStandby::findEcGpe()
  {
  	uint32_t forced = 0;
-@@ -1151,6 +2101,7 @@ void S0ixStandby::findEcGpe()
+@@ -1151,6 +2403,7 @@ void S0ixStandby::findEcGpe()
  			if (ec->evaluateInteger("_GPE", &v) == kIOReturnSuccess) {
  				ecGpe = v;
  				ecGpeFrom = ec->getName();
@@ -1235,14 +1620,28 @@ index 70b6d13..06d1c36 100644
  				break;
  			}
  		}
-@@ -1196,6 +2147,23 @@ void S0ixStandby::publishWakeInfo()
+@@ -1185,17 +2438,34 @@ void S0ixStandby::publishWakeInfo()
+ 	}
+ 	char buf[192];
+ 	int n = snprintf(buf, sizeof(buf), "%s", "");
+-	if (pm1StsAtWake & (1u << 8))  n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%sPWRBTN", n ? ", " : "");
+-	if (pm1StsAtWake & (1u << 10)) n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%sRTC", n ? ", " : "");
++	if (pm1StsAtWake & (1u << 8))  snAdd(buf, sizeof(buf), n, "%sPWRBTN", n ? ", " : "");
++	if (pm1StsAtWake & (1u << 10)) snAdd(buf, sizeof(buf), n, "%sRTC", n ? ", " : "");
+ 	for (uint32_t i = 0; i < gpe0Half && i < sizeof(gpe0StsAtWake) && n < (int)sizeof(buf) - 24; i++)
+ 		for (uint32_t b = 0; b < 8; b++)
+ 			if (gpe0StsAtWake[i] & (1u << b)) {
+ 				uint32_t g = i * 8 + b;
+-				n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%sGPE 0x%x%s", n ? ", " : "", g,
++				snAdd(buf, sizeof(buf), n, "%sGPE 0x%x%s", n ? ", " : "", g,
+ 				              g == ecGpe ? " (EC)" : "");
  			}
  	if (!n) snprintf(buf, sizeof(buf), "none latched (PM1_STS 0x%04x)", pm1StsAtWake);
  	setProperty("Last wake source", buf);
 +	{
 +		char en[2 * sizeof(gpe0EnAtHalt) + 1]; size_t k = 0;
 +		for (uint32_t i = 0; i < gpe0Half && i < sizeof(gpe0EnAtHalt); i++)
-+			k += snprintf(en + k, sizeof(en) - k, "%02x", gpe0EnAtHalt[i]);
++			snAdd(en, sizeof(en), k, "%02x", gpe0EnAtHalt[i]);
 +		setProperty("GPE0_EN at last halt (byte 0 first)", en);
 +		char rb[140];
 +		if (lwPad) {
@@ -1259,7 +1658,7 @@ index 70b6d13..06d1c36 100644
  	if (ecGpe != 0xFFFFFFFF) {
  		snprintf(buf, sizeof(buf), "%s by macOS%s", ecEnAtHalt ? "enabled" : "disabled",
  		         ecWake && !ecEnAtHalt ? ", armed by -s0ixecwake" : "");
-@@ -1221,10 +2189,26 @@ void S0ixStandby::updateAC()
+@@ -1221,10 +2491,26 @@ void S0ixStandby::updateAC()
  	onAC = ac;
  }
  
@@ -1286,7 +1685,7 @@ index 70b6d13..06d1c36 100644
  		sender->setTimeoutMS(10000);
  	}
  }
-@@ -1308,6 +2292,15 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+@@ -1308,6 +2594,16 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
  			self->findEcGpe();
  			if (self->ecGpe != 0xFFFFFFFF) self->publishEcWake();
  		}
@@ -1299,27 +1698,41 @@ index 70b6d13..06d1c36 100644
 +			self->setProperty("EC wake on AC", t);
 +		}
 +		self->nvmePrep();
++		if (self->hdaCgMask) self->setupHdaPM();
  		self->publishLog();
  		sender->setTimeoutMS(60000);
  	}
-@@ -1330,15 +2323,27 @@ void S0ixStandby::onSleep()
+@@ -1315,6 +2611,7 @@ void S0ixStandby::battTimerFired(OSObject *owner, IOTimerEventSource *sender)
+ 
+ void S0ixStandby::onSleep()
+ {
++	skipNow = lastSkip = (uint32_t)gSkip;
+ 	lastSleepType = 0;
+ 	if (IOPMrootDomain *root = getPMRootDomain())
+ 		if (OSNumber *n = OSDynamicCast(OSNumber, root->getProperty("IOPMSystemSleepType")))
+@@ -1330,15 +2627,29 @@ void S0ixStandby::onSleep()
  	if (gpuMMIO) {
  		gpuSleep();
  		dispCapture(dispAtSleep, nullptr);
+-		if (refclkWA) refclkSleep();
 +		gDispMMIO = gpuMMIO;
 +		gDispOk = dispAtSleep.valid;
- 		if (refclkWA) refclkSleep();
++		if (refclkWA && !(skipNow & 4)) refclkSleep();
  	}
  	// Drivers (and IOPCIFamily's D3 transition) are done by now.
  	wifiPmcsrSleep = wifiDev ? wifiDev->configRead16(wifiPmCap + 4) : 0xFFFF;
- 
+-
++	if (lastSleepType == kSleepTypeDeepIdle) hdaSleep();
++
 +	if (acNoEc && acNoEcActive && lastSleepType == kSleepTypeDeepIdle) acNoEcCount++;
-+	if (lwWake && lastSleepType == kSleepTypeDeepIdle) lidPsw(true);   // while the EC still answers normally
-+	if (tcssD3 && lastSleepType == kSleepTypeDeepIdle) tcssSleep();   // before the LPS0 entry _DSM, like Linux
++	if (lwWake && !(skipNow & 8) && lastSleepType == kSleepTypeDeepIdle) lidPsw(true);   // while the EC still answers normally
++	if (tcssD3 && !(skipNow & 2) && lastSleepType == kSleepTypeDeepIdle) tcssSleep();   // before the LPS0 entry _DSM, like Linux
 +	if (nobmMask && lastSleepType == kSleepTypeDeepIdle) nobmSleep();
 +	if (lastSleepType == kSleepTypeDeepIdle) nvmeSleep();
++	if (lastSleepType == kSleepTypeDeepIdle && hpetFixEnabled && hpetReg) hpetClearMatches(nullptr, true);
  	entered = false;
- 	if (dsmEnabled && lastSleepType == kSleepTypeDeepIdle &&
+-	if (dsmEnabled && lastSleepType == kSleepTypeDeepIdle &&
++	if (dsmEnabled && !(skipNow & 1) && lastSleepType == kSleepTypeDeepIdle &&
  	    (dsmMask[kIntel] || dsmMask[kMicrosoft] || dsmMask[kAMD])) {
 +		if (iomReg) iomV[0] = *iomReg;
  		dsmEntry();
@@ -1330,15 +1743,15 @@ index 70b6d13..06d1c36 100644
  		entered = true;
  	}
  	// Last step: nothing after us may touch PM1_EN before the halt.
-@@ -1355,12 +2360,85 @@ void S0ixStandby::onSleep()
+@@ -1355,12 +2666,85 @@ void S0ixStandby::onSleep()
  		rtcBlocked = true;
  	}
  	ecArm = ecWake && gpe0EnPort && ecGpe != 0xFFFFFFFF && lastSleepType == kSleepTypeDeepIdle;
-+	pbArm = pbWake && pbEnPort && pm1StsPort && gpe0StsPort && lastSleepType == kSleepTypeDeepIdle;
-+	lwArm = lwWake && (lwDev[0] || lwDev[1]) && lastSleepType == kSleepTypeDeepIdle;
++	pbArm = pbWake && !(skipNow & 8) && pbEnPort && pm1StsPort && gpe0StsPort && lastSleepType == kSleepTypeDeepIdle;
++	lwArm = lwWake && !(skipNow & 8) && (lwDev[0] || lwDev[1]) && lastSleepType == kSleepTypeDeepIdle;
 +	lwWoke = false;
 +	kbArm = false; kbWoke = false; kbArmResult = 0; kbStsAtWake = 0;
-+	if (kbWake && lastSleepType == kSleepTypeDeepIdle) {
++	if (kbWake && !(skipNow & 8) && lastSleepType == kSleepTypeDeepIdle) {
 +		UInt32 open = 1;                                   // no lid device: treat as open
 +		if (lwDev[0] && lwDev[0]->evaluateInteger("_LID", &open) != kIOReturnSuccess) open = 1;
 +		kbArm = open != 0;
@@ -1365,7 +1778,7 @@ index 70b6d13..06d1c36 100644
 +	char line[112]; int k = snprintf(line, sizeof(line), "#%u %02lu:%02lu:%02lu UTC: %s%s%s EC status 0x%02x, queries:", ++me->elSeq,
 +		(unsigned long)((sec / 3600) % 24), (unsigned long)((sec / 60) % 60), (unsigned long)(sec % 60),
 +		me->elEc ? "EC GPE" : "not EC", (me->elPm1 & kPm1PwrBtn) ? " +PWRBTN" : "", (me->elPm1 & (1u << 10)) ? " +RTC" : "", me->elSci);
-+	for (uint8_t i = 0; i < n && k < (int)sizeof(line) - 5; i++) k += snprintf(line + k, sizeof(line) - (size_t)k, " %02X", q[i]);
++	for (uint8_t i = 0; i < n && k < (int)sizeof(line) - 5; i++) snAdd(line, sizeof(line), k, " %02X", q[i]);
 +	if (!n && k < (int)sizeof(line) - 6) snprintf(line + k, sizeof(line) - (size_t)k, " none");
 +	const uint32_t slot = (me->elSeq - 1) % 24;
 +	snprintf(me->elLines[slot], sizeof(me->elLines[slot]), "%s", line);
@@ -1416,14 +1829,14 @@ index 70b6d13..06d1c36 100644
  void S0ixStandby::onWake()
  {
  	// First: give RTC wakes back before anything else runs.
-@@ -1378,10 +2456,71 @@ void S0ixStandby::onWake()
+@@ -1378,10 +2762,74 @@ void S0ixStandby::onWake()
  	ecArmed = false;
  	if (wakeInfoValid && ecGpe != 0xFFFFFFFF && (gpe0StsAtWake[ecGpe / 8] >> (ecGpe % 8) & 1))
  		ecWakeCount++;
 +	if (edWake && lastSleepType == kSleepTypeDeepIdle) {
 +		char ed[300]; int n = snprintf(ed, sizeof(ed), "EC status at halt 0x%02x (GPE sts %d), drained %u:", ecStsAtHalt,
 +		                               (int)edGpeStsAtHalt, edN);
-+		for (uint8_t i = 0; i < edN && n < (int)sizeof(ed) - 6; i++) n += snprintf(ed + n, sizeof(ed) - (size_t)n, " _Q%02X", edQ[i]);
++		for (uint8_t i = 0; i < edN && n < (int)sizeof(ed) - 6; i++) snAdd(ed, sizeof(ed), n, " _Q%02X", edQ[i]);
 +		snprintf(ed + n, sizeof(ed) - (size_t)n, "; EC status at wake 0x%02x, EC GPE dword at wake 0x%08x; PM1_CNT 0x%04x; SCI RTE 0x%08x:%08x%s",
 +		         ecStsAtWakeP, ecEnAtWake, pm1CntAtHalt, sciRteHigh, sciRteLow, ioapic ? "" : " (no IOAPIC map)");
 +		setProperty("EC drain at last sleep", ed);
@@ -1471,6 +1884,7 @@ index 70b6d13..06d1c36 100644
 +			thread_call_enter_delayed(pbCall, dl);
 +		}
 +	}
++	if (hpetFixEnabled && hpetReg) hpetClearMatches(nullptr, true);
  	if (entered) {
 +		if (iomReg) iomV[2] = *iomReg;
  		dsmExit();
@@ -1484,19 +1898,91 @@ index 70b6d13..06d1c36 100644
 +	nobmWake();
 +	tcssWake();
 +	if (elPending && elCall) { uint64_t dl; clock_interval_to_deadline(200, kMillisecondScale, &dl); thread_call_enter_delayed(elCall, dl); }
-+	if (lwWake && lastSleepType == kSleepTypeDeepIdle) lidPsw(false);
++	if (lwWake && !(skipNow & 8) && lastSleepType == kSleepTypeDeepIdle) lidPsw(false);
++	skipNow = 0;
++	hdaWake();
  	// Before any driver wakes: Apple's accelerator restarts the engines later.
  	if (gpuMMIO) {
  		dispCapture(dispAtWake, &dispAtSleep);
+@@ -1415,6 +2863,10 @@ void S0ixStandby::onWake()
+ 	snap.gpuVerdict = gpuVerdict; snap.gpuResetResult = gpuResetResult;
+ 	snap.gpuResetUs = gpuResetUs; snap.gpuEnginesReady = gpuEnginesReady;
+ 	snap.wifiPmcsrSleep = wifiPmcsrSleep; snap.wifiPmcsrWake = wifiPmcsrWake;
++	snap.hdaValid = hdaSleepValid;
++	snap.hdaPmSleep = hdaPmSleep; snap.hdaPmWake = hdaPmWake;
++	snap.hdaPgSaved = hdaPgSaved; snap.hdaPgAfter = hdaPgAfter;
++	snap.hdaCgSaved = hdaCgSaved; snap.hdaCgAfter = hdaCgAfter;
+ 	snap.dispAtSleep = dispAtSleep; snap.dispAtWake = dispAtWake;
+ 	if (pmcHaltValid)
+ 		for (uint32_t i = 0; i < 1024; i++) pmcSnap[i] = pmcAtHalt[i];
+@@ -1471,6 +2923,12 @@ void S0ixStandby::publish()
+ 	absolutetime_to_nanoseconds(snap.timeAtWake - snap.timeAtSleep, &ns);
+ 
+ 	setProperty("Sleep count", (unsigned long long)snap.sleepCount, 32);
++	{   // here, not in iomLater: that one only runs after a DSM exit, so a skip-0x1 sleep left the old value
++		char sk[120];
++		snprintf(sk, sizeof(sk), "0x%x%s%s%s%s", lastSkip, lastSkip & 1 ? " LPS0-DSM" : "", lastSkip & 2 ? " TCSS-D3cold" : "",
++		         lastSkip & 4 ? " refclk" : "", lastSkip & 8 ? " wake-arming" : "");
++		setProperty("Skipped at last sleep", sk);
++	}
+ 	if (acNoRtc && pm1EnPort) {
+ 		setProperty("AC RTC wake blocks", (unsigned long long)rtcBlockCount, 32);
+ 		setProperty("On AC (last check)", onAC);
+@@ -1503,7 +2961,7 @@ void S0ixStandby::publish()
+ 					num->release();
+ 				}
+ 				if (n < sizeof(line))
+-					n += snprintf(line + n, sizeof(line) - n, " %s=%llu%%", kCStates[i].name, (unsigned long long)pct);
++					snAdd(line, sizeof(line), n, " %s=%llu%%", kCStates[i].name, (unsigned long long)pct);
+ 			}
+ 			setProperty("Last C-state percent", d);
+ 			d->release();
+@@ -1534,6 +2992,14 @@ void S0ixStandby::publish()
+ 	publishGPU();
+ 	publishDisplay();
+ 	publishLog();
++	if (hpetReg) { uint32_t m = 0; hpetClearMatches(&m, false); publishHpet(m); }
++	if (hdaDev && snap.hdaValid) {
++		char h[180];
++		snprintf(h, sizeof(h), "00:1f.3 8086:%04x: PMCSR D%u(0x%04x)/D%u(0x%04x), PGCTL 0x%08x->0x%08x, CGCTL 0x%08x->0x%08x",
++		         hdaDid, snap.hdaPmSleep & 3, snap.hdaPmSleep, snap.hdaPmWake & 3, snap.hdaPmWake,
++		         snap.hdaPgSaved, snap.hdaPgAfter, snap.hdaCgSaved, snap.hdaCgAfter);
++		setProperty("HDA PCI power state", h);
++	}
+ 	if (wifiDev) {
+ 		char w[96];
+ 		snprintf(w, sizeof(w), "at sleep action D%u (0x%04x), at wake action D%u (0x%04x)",
 diff --git a/S0ixStandby/S0ixStandby.hpp b/S0ixStandby/S0ixStandby.hpp
-index 06c299b..8136815 100644
+index 06c299b..e6300da 100644
 --- a/S0ixStandby/S0ixStandby.hpp
 +++ b/S0ixStandby/S0ixStandby.hpp
-@@ -13,9 +13,11 @@
+@@ -13,9 +13,33 @@
  #define S0IXSTANDBY_HPP
  
  #include <IOKit/IOService.h>
 +#include <kern/thread_call.h>
++#include <stdarg.h>
++#include <libkern/libkern.h>
++
++// snAdd: append to a fixed buffer and keep the running length inside it. snprintf returns the length it WOULD have
++// written, so "n += snprintf(buf + n, size - n, ...)" runs n past the end and "size - n" wraps around (stack overflow;
++// seen as a ___stack_chk_fail panic in publishTypeC when a dark wake read 0xFFFFFFFF from the Type-C xHCI).
++template <typename T>
++static inline void snAdd(char *buf, size_t size, T &n, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
++template <typename T>
++static inline void snAdd(char *buf, size_t size, T &n, const char *fmt, ...)
++{
++	if (!buf || size == 0) return;
++	size_t cur = (long long)n < 0 ? 0 : (size_t)n;
++	if (cur >= size - 1) { n = (T)(size - 1); return; }
++	va_list ap;
++	va_start(ap, fmt);
++	int w = vsnprintf(buf + cur, size - cur, fmt, ap);
++	va_end(ap);
++	if (w > 0) cur += (size_t)w;
++	if (cur > size - 1) cur = size - 1;
++	n = (T)cur;
++}
  #include <IOKit/IOWorkLoop.h>
  #include <IOKit/IOTimerEventSource.h>
  #include <IOKit/IOMemoryDescriptor.h>
@@ -1504,7 +1990,60 @@ index 06c299b..8136815 100644
  #include <IOKit/acpi/IOACPIPlatformDevice.h>
  #include <IOKit/pci/IOPCIDevice.h>
  
-@@ -237,6 +239,141 @@ private:
+@@ -148,6 +172,19 @@ private:
+ 	void dsmExit();
+ 
+ 	bool setupMeter();
++
++	// HPET standing comparator-match fix: AppleHPET disables HPET (GEN_CONF b0=0),
++	// zeroes MAIN_CNT, and leaves T0..T3 comparators at 0. That standing match
++	// holds PWRM+0x1C6C bit 19 low and stalls PCH entry to S0i2.0 / SLP_S0.
++	IOMemoryMap *hpetMap {nullptr};
++	volatile uint32_t *hpetReg {nullptr};
++	uint64_t hpetAddr {0};
++	bool hpetFixEnabled {false};
++	uint32_t hpetFixCount {0};
++	uint32_t hpetFixMask {0};
++	void setupHpetFix();
++	uint32_t hpetClearMatches(uint32_t *outMask, bool write);
++	void publishHpet(uint32_t mask);
+ 	bool readCounter(uint64_t &value);
+ 
+ 	// Everything publish() needs, copied at wake. A dark wake may go back to
+@@ -165,6 +202,9 @@ private:
+ 		GpuState gpuAtSleep, gpuAtWake;
+ 		uint32_t gpuVerdict, gpuResetResult, gpuResetUs, gpuEnginesReady;
+ 		uint16_t wifiPmcsrSleep, wifiPmcsrWake;
++		bool hdaValid;
++		uint16_t hdaPmSleep, hdaPmWake;
++		uint32_t hdaPgSaved, hdaPgAfter, hdaCgSaved, hdaCgAfter;
+ 		DispState dispAtSleep, dispAtWake;
+ 	};
+ 	Snapshot snap {};
+@@ -227,6 +267,22 @@ private:
+ 	static void wifiTimerFired(OSObject *owner, IOTimerEventSource *sender);
+ 	bool setupWifiPM();
+ 
++	// -s0ixhdapm: Intel cAVS/HDA (00:1f.3) clock/power gating across Deep Idle.
++	// AppleHDAController leaves PCI CGCTL (0x48) at 0x00000000 in D3hot, keeping
++	// AC_Ring_Osc, OPIDMI_PG, and GPIO_COM5_VNN_REQ awake (~0.4-0.6 W). Restoring
++	// Intel PCH CGCTL bits (default 0x003F01FF; override with s0ixhdacg=<mask>)
++	// and PGCTL (ADSPPGD=0, LSRMD=1) in PCI config space during Deep Idle clears
++	// those gates and restores the saved values before AppleHDAController wakes.
++	uint32_t hdaCgMask {0};
++	IOPCIDevice *hdaDev {nullptr};
++	UInt8 hdaPmCap {0};
++	uint16_t hdaDid {0}, hdaPmSleep {0xFFFF}, hdaPmWake {0xFFFF};
++	uint32_t hdaPgSaved {0}, hdaPgAfter {0}, hdaCgSaved {0}, hdaCgAfter {0};
++	bool hdaTouched {false}, hdaSleepValid {false};
++	void setupHdaPM();
++	void hdaSleep();
++	void hdaWake();
++
+ 	// -s0ixacnortc: no RTC alarm wakes from Deep Idle while on AC
+ 	bool acNoRtc {false}, onAC {false}, rtcBlocked {false};
+ 	uint16_t pm1EnPort {0}, pm1EnSaved {0};
+@@ -237,6 +293,147 @@ private:
  	// Wake sources (read-only by default) and -s0ixecwake: keep the EC's
  	// GPE armed during Deep Idle so lid open (EC query) can wake.
  	bool ecWake {false}, ecArm {false}, ecArmed {false}, wakeInfoValid {false};
@@ -1626,6 +2165,12 @@ index 06c299b..8136815 100644
 +	char nvPsInfo[kNvMax][140] {};
 +	bool nvmeCtrlPs(uint32_t i);
 +	void nvmePrep();
++	// Full 4 KB config space of the root ports + drives through ECAM (PCIEXBAR), so the quiesce action can read the
++	// root ports' link state (LNKSTA, Intel LTSSM/power-gating registers) right before the halt without IOPCIFamily locks.
++	IOMemoryMap *nvCfgMap[kNvMax] {};
++	bool nvCfgTried {false};
++	uint32_t skipNow {0}, lastSkip {0};                // debug.s0ix.skip latched at the sleep action
++	void nvCfgMapAll();
 +	bool prepAlloc {true};
 +	uint32_t nvMode {0};
 +	uint8_t nvMsix[kNvMax] {};

@@ -16,11 +16,12 @@ pmcA=${out%.txt}-pmc-awake.bin; sysctl -b debug.s0ix.pmc > $pmcA 2>/dev/null || 
 dispA=${out%.txt}-disp-awake.bin; sysctl -b debug.s0ix.disp > $dispA 2>/dev/null || rm -f $dispA   # 79c7d8d1+
 { print "start $(date '+%F %T')  charge ${c1} mAh  ${v1} mV  $(pmset -g batt | tail -1 | cut -c1-60)"; } > $out
 sync; sleep 2
-fullwakes() { pmset -g log | awk '$4 == "Wake" && /Deep Idle/' | wc -l; }   # full wakes only (incl. DarkWake to FullWake)
-n0=$(fullwakes)
+# last full wake (incl. DarkWake to FullWake), by timestamp: counting lines fails once pmset's log is full and rolls over
+lastwake() { pmset -g log | awk '$4 == "Wake" && /Deep Idle/ {l = $1 " " $2} END {print l}'; }
+w0=$(lastwake)
 [[ $1 == lid ]] && print "   (lid mode: waiting for you to close the lid)" >> $out || pmset sleepnow >/dev/null
 # wait for the real wake (sleep entry can take > 20 s); the process is frozen while asleep
-while (( $(fullwakes) <= n0 )); do sleep 2; done
+while [[ $(lastwake) == "$w0" ]]; do sleep 2; done
 sleep 15
 c2=$(bat AppleRawCurrentCapacity); v2=$(bat Voltage); read eu p2 i2 g2 <<< "$(rapl)"; t2=$(date +%s); cs2=$(mktemp); cores $cs2
 slept=$(pmset -g log | grep -E "	Wake .*Deep Idle|	DarkWake " | tail -1 | cut -c1-120)
@@ -61,6 +62,6 @@ print(f'  GT RC6 during the halt: {int(m[1])*1.28e-6/(int(m[2])/f)*100:.1f} %  (
 dispH=${out%.txt}-disp-halt.bin; sysctl -b debug.s0ix.disphalt > $dispH 2>/dev/null || rm -f $dispH
 if [[ -s ${dispA:-} && -s ${dispH:-} ]]; then
   for f in $dispA $dispH; do python3 $here/disp2txt.py $f > ${f%.bin}.txt; done
-  { print "\n#### display registers: awake (before sleep) vs Deep Idle halt"; python3 $here/gpu-wm.py ${dispA%.bin}.txt ${dispH%.bin}.txt; print "\n-- raw registers that differ (offset awake halt):"; join <(tail -n +2 ${dispA%.bin}.txt) <(tail -n +2 ${dispH%.bin}.txt) | awk '$2 != $3'; } >> $out 2>&1
+  { print "\n#### display registers: awake (before sleep) vs Deep Idle halt"; python3 $here/gpu-wm.py ${dispA%.bin}.txt ${dispH%.bin}.txt; print "\n-- GPU/display interrupt registers (armed = IER & ~IMR; <== armed source pending at the halt):"; python3 $here/irqregs.py ${dispA%.bin}.txt ${dispH%.bin}.txt; print "\n-- raw registers that differ (offset awake halt):"; join <(tail -n +2 ${dispA%.bin}.txt) <(tail -n +2 ${dispH%.bin}.txt) | awk '$2 != $3'; } >> $out 2>&1
 fi
 sync; cat $out
